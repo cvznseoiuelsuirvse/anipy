@@ -10,3 +10,4 @@ web/
 *.db
 *.json
 *.lock
+.DS_Store
