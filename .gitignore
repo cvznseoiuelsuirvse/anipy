@@ -6,5 +6,7 @@ wheels/
 web/
 *.egg-info
 .venv
+
 *.db
-*.jdon
+*.json
+*.lock
