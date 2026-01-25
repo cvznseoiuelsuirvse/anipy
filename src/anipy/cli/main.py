@@ -1,7 +1,5 @@
 import sys
 import os
-import bs4
-import aiohttp
 import time
 import asyncio
 import webbrowser
@@ -26,31 +24,6 @@ hianime = HiAnimeAPI()
 ctx: ListType
 
 TERM_WIDTH = lambda: os.get_terminal_size().columns
-
-
-async def resolve_to_mal(title: str, other_title: str) -> str | None:
-    async def req(url: str) -> str:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                return await resp.text()
-
-    search_url = f"https://myanimelist.net/anime.php?q={title}&cat=anime"
-    search_resp = await req(search_url)
-    soup = bs4.BeautifulSoup(search_resp, "html.parser")
-
-    results = soup.select_one(".js-categories-seasonal.js-block-list.list")
-    if not results:
-        soup.decompose()
-        return None
-
-    for tr in results.find_all("tr"):
-        a = tr.select_one(".hoverinfo_trigger.fw-b.fl-l")
-        if a and a.text.strip() in (title, other_title):
-            soup.decompose()
-            return a.attrs["href"]
-
-    soup.decompose()
-    return None
 
 
 def get_longest_values(objs: Iterable) -> dict[str, int]:

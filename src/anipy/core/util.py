@@ -1,4 +1,6 @@
 import zlib
+import aiohttp
+import bs4
 import base64
 import os
 import json
@@ -9,6 +11,31 @@ def get_user_id() -> int:
 
 
 type Serializable = str | int | list | dict
+
+
+async def resolve_to_mal(title: str, other_title: str) -> str | None:
+    async def req(url: str) -> str:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                return await resp.text()
+
+    search_url = f"https://myanimelist.net/anime.php?q={title}&cat=anime"
+    search_resp = await req(search_url)
+    soup = bs4.BeautifulSoup(search_resp, "html.parser")
+
+    results = soup.select_one(".js-categories-seasonal.js-block-list.list")
+    if not results:
+        soup.decompose()
+        return None
+
+    for tr in results.find_all("tr"):
+        a = tr.select_one(".hoverinfo_trigger.fw-b.fl-l")
+        if a and a.text.strip() in (title, other_title):
+            soup.decompose()
+            return a.attrs["href"]
+
+    soup.decompose()
+    return None
 
 
 def get_main_dir() -> str:
