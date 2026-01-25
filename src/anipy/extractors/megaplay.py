@@ -2,8 +2,8 @@ from typing import Awaitable, Callable
 import re
 import aiohttp
 
-from .._types.structs import Extractor
-from .._types.exceptions import InvalidURL
+from ..core.exceptions import InvalidURL
+from . import Extractor
 
 
 async def make_request[T](url: str, headers: dict, params: dict, func: Callable[[aiohttp.ClientResponse], Awaitable[T]]) -> T:

@@ -13,9 +13,9 @@ from io import TextIOWrapper
 from datetime import datetime, timedelta
 from typing import Awaitable, Callable, Any
 
-from .._types.structs import EpisodeInfo, EpisodeSources
-from .._types.exceptions import BadResponse, PlaylistError, BadHost
-from ..util import get_main_dir
+from ..core.types import EpisodeInfo, EpisodeSources
+from ..core.exceptions import BadResponse, PlaylistError, BadHost
+from ..core.util import get_main_dir
 
 from .progressbar import ProgressBar
 

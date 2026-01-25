@@ -8,10 +8,9 @@ from enum import StrEnum
 from html import unescape
 from typing import overload, Literal, Awaitable, Callable, TypeVar
 
-
-from .._types.exceptions import AttributeNotFound
-from .._types.structs import AnimeInfo, EpisodeInfo, EpisodeSources, SearchObject
-from .._types.enums import Extractors, Servers
+from ..core.exceptions import AttributeNotFound
+from ..core.types import AnimeInfo, EpisodeInfo, EpisodeSources, SearchObject, Servers
+from ..extractors import Extractors
 
 BASE_URL = "https://hianimez.to/"
 

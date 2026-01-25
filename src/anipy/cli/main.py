@@ -1,20 +1,19 @@
 import sys
 import os
+import bs4
+import aiohttp
 import time
 import asyncio
 import webbrowser
 
 from typing import Callable, Iterable
 
-from .._types.enums import LockFileKeys
-from .._types.structs import DataList, SearchList, DataObject, SearchObject, EpisodeSources, EpisodeInfo
-from .._types.exceptions import BadHost, BadResponse
+from ..core.types import LockFileKeys, DataList, SearchList, DataObject, SearchObject, EpisodeSources, EpisodeInfo
+from ..core.exceptions import BadHost, BadResponse
+from ..core.data import Data, lock_file_update, lock_file_get_content
+from ..providers.hianime import HiAnimeAPI
+from .builder import CLIApp, ErrorTypes
 
-from ..data import Data
-from ..deps import HiAnimeAPI
-from ..deps.cli_builder import CLIApp, ErrorTypes
-
-from ..util import lock_file_update, lock_file_get_content, resolve_to_mal
 
 from .player import Player
 
@@ -27,6 +26,31 @@ hianime = HiAnimeAPI()
 ctx: ListType
 
 TERM_WIDTH = lambda: os.get_terminal_size().columns
+
+
+async def resolve_to_mal(title: str, other_title: str) -> str | None:
+    async def req(url: str) -> str:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                return await resp.text()
+
+    search_url = f"https://myanimelist.net/anime.php?q={title}&cat=anime"
+    search_resp = await req(search_url)
+    soup = bs4.BeautifulSoup(search_resp, "html.parser")
+
+    results = soup.select_one(".js-categories-seasonal.js-block-list.list")
+    if not results:
+        soup.decompose()
+        return None
+
+    for tr in results.find_all("tr"):
+        a = tr.select_one(".hoverinfo_trigger.fw-b.fl-l")
+        if a and a.text.strip() in (title, other_title):
+            soup.decompose()
+            return a.attrs["href"]
+
+    soup.decompose()
+    return None
 
 
 def get_longest_values(objs: Iterable) -> dict[str, int]:
@@ -325,6 +349,7 @@ async def info(id: int, keys: list[str] | None = None):
                 value = "".join(f"\n    {ep.num:<{longest_ep_num}} {ep.title}" for ep in value)
 
             case "added_at" | "finished_at":
+                assert isinstance(value, int)
                 if value > 1:
                     ts = time.strftime("%b %d %H:%M %Y", time.localtime(value))
                     value = ts

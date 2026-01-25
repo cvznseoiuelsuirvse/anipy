@@ -7,17 +7,42 @@ import time
 
 from typing import Generator, Literal, get_origin, get_args, AsyncGenerator
 
-from ._types.enums import Servers, Extractors
-from ._types.structs import DataObject, DataList
-from ._types.exceptions import BadResponse, EnvVarNotFound
+from .types import Servers, DataObject, DataList, LockFileKeys, Serializable
+from ..extractors import Extractors
+from .exceptions import BadResponse, EnvVarNotFound
 
-from .util import LockFileKeys, lock_file_update, lock_file_get_content, compress_data, decompress_data, user_id
+from .util import compress_data, decompress_data, get_user_id
 
-from .deps import DiscordAPI
-from .deps.webhook import Webhook, Body
+from ..integrations.discord import DiscordAPI
+from ..integrations.webhook import Webhook, Body
 
 user_config_dir = lambda file: f"{os.environ['HOME']}/.config/anipy/{file}" if os.name == "posix" else f"{os.environ['APPDATA']}/anipy/{file}"
 user_data_dir = lambda file: f"{os.environ['HOME']}/.local/share/anipy/{file}" if os.name == "posix" else f"{os.environ['APPDATA']}/anipy/{file}"
+
+
+def get_lock_file() -> str:
+    p = os.path.join(os.path.dirname(__file__), f"anipy-{get_user_id()}-lock.json")
+    if not os.path.exists(p):
+        with open(p, "w") as f:
+            json.dump({}, f)
+
+    return p
+
+
+def lock_file_update(key: LockFileKeys, value: Serializable) -> None:
+    p = get_lock_file()
+
+    with open(p, "r") as f:
+        data = json.load(f)
+
+    data[key] = value
+    with open(p, "w") as f:
+        json.dump(data, f, indent=4)
+
+
+def lock_file_get_content() -> dict:
+    with open(get_lock_file(), "r") as f:
+        return json.load(f)
 
 
 class Config:
@@ -201,7 +226,7 @@ class DB:
 
 class LocalDB:
     def __init__(self) -> None:
-        db_filename = f"anipy-{user_id()}.db"
+        db_filename = f"anipy-{get_user_id()}.db"
         self.__path = os.path.join(os.path.dirname(__file__), db_filename)
 
         dir_name = os.path.dirname(self.__path)

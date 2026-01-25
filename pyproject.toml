@@ -1,8 +1,8 @@
 [project]
 name = "anipy"
-version = "0.3.9"
+version = "0.4.0"
 description = "animeshka :P"
-requires-python = ">=3.9"
+requires-python = ">=3.12"
 dependencies = [
     "Pycryptodome",
     "aiohttp",
@@ -13,5 +13,5 @@ dependencies = [
 ]
 
 [project.scripts]
-anipy = "anipy.cli.cli:main"
-anipyweb = "anipy.web.app:main"
+anipy = "anipy2.cli.main:main"
+anipyweb = "anipy2.web.app:main"

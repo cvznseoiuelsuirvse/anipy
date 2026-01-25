@@ -1,5 +1,8 @@
+from enum import StrEnum
 from typing import Any, Literal
 from dataclasses import dataclass
+
+type Serializable = str | int | list | dict
 
 
 @dataclass
@@ -20,15 +23,6 @@ class BaseObject:
                 d[k] = v
 
         return d
-
-
-class Extractor:
-    headers: dict[str, str]
-
-    def __init__(self, embed_url: str) -> None:
-        self.embed_url = embed_url
-
-    async def extract(self) -> dict: ...
 
 
 class EpisodeSources:
@@ -118,3 +112,17 @@ class SearchList(list[SearchObject]):
 
 class DataList(list[DataObject]):
     name = "data"
+
+
+class LockFileKeys(StrEnum):
+    DB_LAST_UPDATE = "db_last_updated"
+    DB_PAGES = "db_pages"
+    WATCHLIST_LAST_REFRESH = "watchlist_last_refresh"
+
+
+class Servers(StrEnum):
+    RAPIDCLOUD = "1"
+    STREAMTAPE = "3"
+    VIDSTREAMING = "4"
+    STREAMSB = "5"
+    MEGAPLAY = "9"

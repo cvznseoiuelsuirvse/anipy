@@ -9,7 +9,7 @@ import aiohttp
 from typing import Awaitable, Callable, Iterable, TypeVar, overload, Literal, TypeAlias
 from enum import StrEnum, IntFlag
 
-from .._types.structs import Extractor
+from . import Extractor
 
 DEFAULT = object()
 HEXDIGITS = "0123456789abcdef"
