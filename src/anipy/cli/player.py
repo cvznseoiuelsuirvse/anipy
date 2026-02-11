@@ -1,4 +1,5 @@
 import asyncio
+import json
 import shlex
 import aiohttp
 import os
@@ -15,7 +16,7 @@ from typing import Awaitable, Callable, Any
 
 from ..core.types import EpisodeInfo, EpisodeSources
 from ..core.exceptions import BadResponse, PlaylistError, BadHost
-from ..core.util import get_main_dir
+from ..core.util import get_temp_dir
 
 from .progressbar import ProgressBar
 
@@ -27,7 +28,7 @@ def _remove_intro_outro_ffmpeg(output_file: str, intro: tuple[int, int], outro: 
     outro_s, outro_e = outro
 
     _, filename = tempfile.mkstemp()
-    file_list_txt = os.path.join(get_main_dir(), filename)
+    file_list_txt = os.path.join(get_temp_dir(), filename)
 
     concat_cmd = ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", file_list_txt, "-c", "copy", output_file]
     cut_cmd = [
@@ -206,7 +207,7 @@ class Player:
         self.__player_bin = player_bin
         self.headers = headers
 
-        self.__main_dir = get_main_dir()
+        self.__main_dir = get_temp_dir()
 
         self.__progress: ProgressBar
         self.__socket = ("", 8842)
@@ -349,34 +350,9 @@ class Player:
         with open(master_output_file, "w") as f:
             f.write(master_file_content)
 
-    def _play(self, video_file: str, sub_file: str, downloaded: bool) -> None:
+    def _play(self, video_file: str, sub_file: str | None, downloaded: bool) -> None:
         if not shutil.which(self.__player_bin):
             raise SystemError(f"'{self.__player_bin}' executable not found")
-
-            # command = [self.__player_bin, video_file, f"--sub-file={sub_file}"]
-            #
-            # if self.__player_bin == "mpv":
-            #     header_fields = ",".join(f"'{k}: {v}'" for k, v in self.headers.items())
-            #     command.append(f"--http-header-fields={header_fields}")
-            #
-            # print(command)
-            # if not downloaded:
-            #     handler = lambda *args, **kwargs: Handler(*args, directory=self.__main_dir, **kwargs)
-            #     self.__server = http.server.HTTPServer(self.__socket, handler)
-            #     self.__server_thread = threading.Thread(target=self.__server.serve_forever)
-            #     self.__server_thread.start()
-            #
-            #     subprocess.run(command)
-            #     # proc = subprocess.run(command, capture_output=True)
-            #     # if proc.returncode != 0:
-            #     #     print(f"{self.__player_bin}: {proc.stdout.decode()}")
-            #
-            #     self.__server.shutdown()
-            #     self.__server.server_close()
-            #     self.__server_thread.join()
-            #
-            # else:
-            #     subprocess.run(command, stdout=subprocess.DEVNULL)
 
         command = f"{self.__player_bin} {video_file}"
 
@@ -439,11 +415,11 @@ class Player:
             file = f"http://localhost:{self.__socket[1]}/{os.path.basename(master_file)}"
             print(f"{ep_info.num} {ep_info.title}")
 
-        sub_file_url = next((track["file"] for track in ep_sources.tracks if "default" in track))
-        sub_file = os.path.join(self.__main_dir, f"{filename_base}.vtt")
+        sub_file_url = next((track["file"] for track in ep_sources.tracks if "default" in track), None)
 
-        if download and cut:
+        if download and cut and sub_file_url:
             sub_file_content = await self._make_request("get", sub_file_url, lambda r: r.text())
+            sub_file = os.path.join(self.__main_dir, f"{filename_base}.vtt")
 
             with open(sub_file, "w") as f:
                 _shift_subs(sub_file_content, f, intro, outro)

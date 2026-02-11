@@ -16,12 +16,33 @@ from .util import compress_data, decompress_data, get_user_id
 from ..integrations.discord import DiscordAPI
 from ..integrations.webhook import Webhook, Body
 
-user_config_dir = lambda file: f"{os.environ['HOME']}/.config/anipy/{file}" if os.name == "posix" else f"{os.environ['APPDATA']}/anipy/{file}"
-user_data_dir = lambda file: f"{os.environ['HOME']}/.local/share/anipy/{file}" if os.name == "posix" else f"{os.environ['APPDATA']}/anipy/{file}"
+
+def get_user_config_dir() -> str:
+    if os.name == "posix":
+        path = os.path.join(os.environ["HOME"], ".config", "anipy")
+    else:
+        path = os.path.joni(os.environ["APPDATA"], "anipy")
+
+    if not os.path.exists(path):
+        os.makedirs(path)
+
+    return path
+
+
+def get_user_data_dir() -> str:
+    if os.name == "posix":
+        path = os.path.join(os.environ["HOME"], ".local", "share", "anipy")
+    else:
+        path = os.path.joni(os.environ["APPDATA"], "anipy")
+
+    if not os.path.exists(path):
+        os.makedirs(path)
+
+    return path
 
 
 def get_lock_file() -> str:
-    p = os.path.join(os.path.dirname(__file__), f"anipy-{get_user_id()}-lock.json")
+    p = os.path.join(get_user_data_dir(), f"anipy-lock.json")
     if not os.path.exists(p):
         with open(p, "w") as f:
             json.dump({}, f)
@@ -46,33 +67,33 @@ def lock_file_get_content() -> dict:
 
 
 class Config:
-    banner: list[str]
-    download: bool
-    cut: bool
-    player: Literal["mpv", "vlc"]
-    server: Servers
-    extractor: Extractors
+    # fmt: off
+    banner:     list[str]               = ["continue watching", "highlighted"]
+    download:   bool                    = False
+    cut:        bool                    = True
+    player:     Literal["mpv", "vlc"]   = "mpv"
+    server:     Servers                 = Servers.VIDSTREAMING
+    extractor:  Extractors              = Extractors.MEGACLOUD
+    prompt:     str                     = "{} > "
+    # fmt: on
 
     def __init__(self) -> None:
-        self.__path = user_config_dir("settings.json")
+        self.__path = os.path.join(get_user_config_dir(), "settings.json")
+        self.__obj = {}
 
-        if not os.path.exists(self.__path):
-            self.__obj = self.create()
-
-        else:
+        if os.path.exists(self.__path):
             with open(self.__path, "r") as f:
-                self.__obj: dict = json.load(f)
+                self.__obj = json.load(f)
+                for k, v in self.__obj.items():
+                    match k:
+                        case "extractor":
+                            setattr(self, k, Extractors[v])
 
-        for k, v in self.__obj.items():
-            match k:
-                case "extractor":
-                    setattr(self, k, Extractors[v])
+                        case "server":
+                            setattr(self, k, Servers[v])
 
-                case "server":
-                    setattr(self, k, Servers[v])
-
-                case _:
-                    setattr(self, k, v)
+                        case _:
+                            setattr(self, k, v)
 
     def _get_annotations(self) -> dict:
         res = {}
@@ -93,33 +114,33 @@ class Config:
         return res
 
     def update(self, key: str, value) -> str | None:
-        attrs = [i for i in dir(self) if not i.startswith("_") and not callable(getattr(self, i))]
+        cfg = self.get_running_config()
 
-        if key not in attrs:
+        if key not in cfg:
             return f"unknown key '{key}'"
 
         annotion = Config.__annotations__[key]
         origin = get_origin(annotion)
 
-        try:
-            value = eval(value)
+        if annotion != str:
+            try:
+                value = eval(value)
 
-        except NameError:
-            return f"invalid value {value}"
+            except NameError:
+                return f"invalid value {value}"
 
-        except TypeError:
-            pass
+            except TypeError:
+                pass
 
-        if origin is Literal:
-            if value not in get_args(annotion):
-                return f"unexpected value {value}"
+            if origin is Literal and value not in get_args(annotion):
+                return f"invalid value {value} (expected one of {get_args(annotion)})"
 
-        elif isinstance(annotion, type):
-            if not isinstance(value, annotion):
+            elif isinstance(annotion, type) and not isinstance(value, annotion):
                 return f"invalid arg type"
 
         if key in ("extractor", "server"):
             self.__obj[key] = value.name
+
         else:
             self.__obj[key] = value
 
@@ -127,6 +148,18 @@ class Config:
 
         with open(self.__path, "w") as f:
             json.dump(self.__obj, f, indent=4)
+
+    def get_running_config(self) -> dict:
+        d = {}
+        for k in dir(self):
+            v = getattr(self, k)
+            if not callable(v) and not k.startswith("_"):
+                if k in ("server", "extractor"):
+                    d[k] = v.name
+                else:
+                    d[k] = v
+
+        return d
 
     def create(self) -> dict:
         data = {
@@ -226,12 +259,8 @@ class DB:
 
 class LocalDB:
     def __init__(self) -> None:
-        db_filename = f"anipy-{get_user_id()}.db"
-        self.__path = os.path.join(os.path.dirname(__file__), db_filename)
-
-        dir_name = os.path.dirname(self.__path)
-        if not os.path.exists(dir_name):
-            os.mkdir(dir_name)
+        db_filename = f"data.db"
+        self.__path = os.path.join(get_user_data_dir(), db_filename)
 
         self.__db = DB(self.__path)
         self.__table = "data"
@@ -359,7 +388,6 @@ class DiscordDB:
 
 class Data:
     def __init__(self) -> None:
-        self.config = Config()
         self.remote = DiscordDB()
         self.local = LocalDB()
 
@@ -374,7 +402,7 @@ class Data:
         return DataList(sorted((o for o in self.datadict.values() if o.status == "completed"), key=lambda o: o.finished_at))
 
     async def load(self) -> None:
-        print("local data: ...", end="")
+        print("   local data", end="")
         sys.stdout.flush()
 
         self.__lock_file_content = lock_file_get_content()
@@ -384,19 +412,19 @@ class Data:
         objects = []
 
         if local_db_last_updated == 0:
-            print("\rlocal data: not found", end="")
+            print("\r\033[1m:(\033[0m local data: not found", end="")
             sys.stdout.flush()
 
             async for object in self.remote.pull():
                 self.datadict[object.id] = object
                 objects.append(object)
-            print("\rlocal data: pulled from remote")
+            print("\r\033[1m=D\033[0m local data: pulled from remote")
 
             self.local.add(objects)
             lock_file_update(LockFileKeys.DB_LAST_UPDATE, remote_db_last_updated)
 
         elif remote_db_last_updated > local_db_last_updated:
-            print("\rlocal data: outdated ", end="")
+            print("\r\033[1m:(\033[0m local data: outdated", end="")
             sys.stdout.flush()
             self.local.erase()
 
@@ -404,13 +432,13 @@ class Data:
                 self.datadict[object.id] = object
                 objects.append(object)
 
-            print("\rlocal data: pulled from remote")
+            print("\r[ \033[1m=D\033[0m ] local data: pulled from remote")
 
             self.local.add(objects)
             lock_file_update(LockFileKeys.DB_LAST_UPDATE, remote_db_last_updated)
 
         elif remote_db_last_updated == local_db_last_updated:
-            print("\rlocal data: sync")
+            print("\r\033[1m=D\033[0m local data: sync")
             for object in self.local.pull():
                 self.datadict[object.id] = object
 

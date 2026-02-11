@@ -8,7 +8,8 @@ from typing import Callable, Iterable
 
 from ..core.types import LockFileKeys, DataList, SearchList, DataObject, SearchObject, EpisodeSources, EpisodeInfo
 from ..core.exceptions import BadHost, BadResponse
-from ..core.data import Data, lock_file_update, lock_file_get_content
+from ..core.data import Data, Config, lock_file_update, lock_file_get_content
+from ..core.util import resolve_to_mal
 from ..providers.hianime import HiAnimeAPI
 from .builder import CLIApp, ErrorTypes
 
@@ -17,9 +18,9 @@ from .player import Player
 
 type ListType = DataList | SearchList
 
-PROMPT = "({}) аниме <3  "
 
 data = Data()
+cfg = Config()
 hianime = HiAnimeAPI()
 ctx: ListType
 
@@ -38,7 +39,7 @@ def get_longest_values(objs: Iterable) -> dict[str, int]:
     return r
 
 
-def format_ctx_list(post: Callable[[int, DataObject | SearchObject], bool] | None = None) -> str:
+def format_ctx_list(validate: Callable[[int, DataObject | SearchObject], bool] | None = None) -> str:
     longest_values = get_longest_values(ctx)
     longest_index = len(str(len(ctx) - 1))
 
@@ -47,7 +48,7 @@ def format_ctx_list(post: Callable[[int, DataObject | SearchObject], bool] | Non
         longest_ep_count = longest_values["episode_count"]
         for i, object in enumerate(ctx):
             line = f"  {str(i):<{longest_index}}  {str(object.episode_count):>{longest_ep_count}} {object.title}"
-            if not post or post(i, object):
+            if not validate or validate(i, object):
                 if object.id == "school-days-8757":
                     line = f"\033[7m{line}\033[0m"
                 ret.append(line)
@@ -61,7 +62,7 @@ def format_ctx_list(post: Callable[[int, DataObject | SearchObject], bool] | Non
             else:
                 line = f"  {str(i):<{longest_index}}  {object.title}"
 
-            if not post or post(i, object):
+            if not validate or validate(i, object):
                 if object.id == "school-days-8757":
                     line = f"\033[7m{line}\033[0m"
                 ret.append(line)
@@ -74,13 +75,13 @@ async def get_episode(*, id: int, episode: int) -> tuple[EpisodeInfo, EpisodeSou
     if episode not in range(1, object.episode_count + 1):
         return cli.raise_err(ErrorTypes.INVALID_ARGS, "episode must be withing available episodes")
 
-    extractor = data.config.extractor
+    extractor = cfg.extractor
     anime_info = await hianime.get_anime_info(object.id)
 
     episode_info = anime_info.episodes[episode - 1]
     episode_id = episode_info.id
 
-    episode_sources = await hianime.get_episode_sources(episode_id, extractor, data.config.server)
+    episode_sources = await hianime.get_episode_sources(episode_id, extractor, cfg.server)
 
     return episode_info, episode_sources
 
@@ -95,7 +96,7 @@ async def search(title: str):
 
     resp = await hianime.search(title)
     ctx = SearchList(resp, title)
-    cli.prompt = PROMPT.format(ctx.name)
+    cli.prompt = cfg.prompt.format(ctx.name)
     if resp:
         print(format_ctx_list())
 
@@ -128,7 +129,7 @@ def watchlist():
     """show watchlist"""
     global ctx
     ctx = data.watchlist
-    cli.prompt = PROMPT.format(ctx.name)
+    cli.prompt = cfg.prompt.format(ctx.name)
 
     if ctx:
         print(format_ctx_list())
@@ -165,7 +166,7 @@ async def completed(part: str | None = None, n: int | None = None):
     """show completed list. part: head/tail/all. n: number of rows to show. if not arguments specified it will show last 10 rows"""
     global ctx
     ctx = data.completed
-    cli.prompt = PROMPT.format(ctx.name)
+    cli.prompt = cfg.prompt.format(ctx.name)
 
     if ctx:
         ctx_len = len(ctx)
@@ -218,8 +219,8 @@ async def download(id: int, episode: int):
     episode_info, episode_sources = episode_
 
     try:
-        async with Player("mpv", data.config.extractor.value.headers) as player:
-            await player.get_file(episode_info, episode_sources, play=False, download=True, cut=data.config.cut)
+        async with Player("mpv", cfg.extractor.value.headers) as player:
+            await player.get_file(episode_info, episode_sources, play=False, download=True, cut=cfg.cut)
 
     except (BadResponse, BadHost, SystemError) as ex:
         return cli.raise_err(ErrorTypes.INVALID_RESULT, str(ex))
@@ -236,8 +237,8 @@ async def play(id: int, episode: int):
     episode_info, episode_sources = episode_
 
     try:
-        async with Player("mpv", data.config.extractor.value.headers) as player:
-            await player.get_file(episode_info, episode_sources, play=True, download=False, cut=data.config.cut)
+        async with Player("mpv", cfg.extractor.value.headers) as player:
+            await player.get_file(episode_info, episode_sources, play=True, download=False, cut=cfg.cut)
 
     except (BadResponse, BadHost, SystemError) as ex:
         return cli.raise_err(ErrorTypes.INVALID_RESULT, str(ex))
@@ -258,8 +259,8 @@ async def play_next(id: int):
     episode_info, episode_sources = episode_
 
     try:
-        async with Player("mpv", data.config.extractor.value.headers) as player:
-            await player.get_file(episode_info, episode_sources, play=True, download=False, cut=data.config.cut)
+        async with Player("mpv", cfg.extractor.value.headers) as player:
+            await player.get_file(episode_info, episode_sources, play=True, download=False, cut=cfg.cut)
 
     except (BadResponse, BadHost) as ex:
         return cli.raise_err(ErrorTypes.INVALID_RESULT, str(ex))
@@ -339,22 +340,22 @@ async def info(id: int, keys: list[str] | None = None):
 @cli.on()
 def config_set(key: str, value: str):
     """set config value"""
-    if err_message := data.config.update(key, value):
+    if err_message := cfg.update(key, value):
         cli.raise_err(ErrorTypes.INVALID_ARGS, err_message)
 
 
-@cli.on(validate={"key": lambda key: getattr(data.config, key, None) is not None})
+@cli.on(validate={"key": lambda key: getattr(cfg, key, None) is not None})
 def config_get(key: str):
     """get config value"""
-    print(f"{key}:  {getattr(data.config, key)}")
+    print(f"{key}:  {getattr(cfg, key)}")
 
 
 @cli.on()
 def config():
     """get all config info"""
-    annotations = data.config._get_annotations()
+    annotations = cfg._get_annotations()
     for k, v in annotations.items():
-        print(f"  \033[1m{k:<9}\033[0m \033[3m{str(v):<17}\033[0m: {getattr(data.config, k)}")
+        print(f"  \033[1m{k:<9}\033[0m \033[3m{str(v):<17}\033[0m: {getattr(cfg, k)}")
 
 
 @cli.on(validate={"id": lambda id: id in range(0, len(ctx))})
@@ -376,9 +377,6 @@ async def reset(id: int):
 
 
 async def update_watchlist() -> None:
-    print("watchlist: ... ", end="")
-    sys.stdout.flush()
-
     async def uw(obj: DataObject):
         obj_new = await hianime.get_anime_info(obj.id)
 
@@ -399,21 +397,26 @@ async def update_watchlist() -> None:
 
         lock_file_update(LockFileKeys.WATCHLIST_LAST_REFRESH, int(time.time()))
 
-    print("\rwatchlist: updated")
-
 
 def show_banner() -> None:
-    for b in data.config.banner:
+    if cfg.banner:
+        print()
+
+    for b in cfg.banner:
+        print(f"\033[1m{b}\033[0m")
         match b:
-            case "continue":
-                print("continue watching")
+            case "continue watching":
                 print(format_ctx_list(lambda _, object: True if object.continue_from > 1 else False))
-                print()
 
             case "highlighted":
-                print("highlighted")
                 print(format_ctx_list(lambda _, object: True if object.highlighted else False))
-                print()
+
+            case "info":
+                watchlist_size = len(data.watchlist)
+                completed_size = len(data.completed)
+                print(f"watchlist: {watchlist_size}  completed: {completed_size}")
+
+        print()
 
 
 async def main_():
@@ -422,7 +425,7 @@ async def main_():
     await data.load()
 
     ctx = data.watchlist
-    cli.prompt = PROMPT.format(ctx.name)
+    cli.prompt = cfg.prompt.format(ctx.name)
     await update_watchlist()
 
     show_banner()

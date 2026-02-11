@@ -38,7 +38,7 @@ async def resolve_to_mal(title: str, other_title: str) -> str | None:
     return None
 
 
-def get_main_dir() -> str:
+def get_temp_dir() -> str:
     temp_dir = "/tmp" if os.name == "posix" else os.getenv("TEMP")
     cache_path = os.path.join(temp_dir, f"anipy-{get_user_id()}")
 
