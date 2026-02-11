@@ -3,6 +3,7 @@ __pycache__/
 build/
 dist/
 wheels/
+web/
 ts/
 package*.json
 *.config.js
