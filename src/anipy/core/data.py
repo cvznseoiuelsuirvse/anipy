@@ -432,7 +432,7 @@ class Data:
                 self.datadict[object.id] = object
                 objects.append(object)
 
-            print("\r[ \033[1m=D\033[0m ] local data: pulled from remote")
+            print("\r\033[1m=D\033[0m local data: pulled from remote")
 
             self.local.add(objects)
             lock_file_update(LockFileKeys.DB_LAST_UPDATE, remote_db_last_updated)
