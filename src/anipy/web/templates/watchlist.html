@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en" class="h-full">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+		<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+        <title>:P</title>
+    </head>
+
+	<body class="bg-black p-10 h-full font-mono text-white">
+		<div id="modal" class="fixed inset-0 bg-black opacity-75 z-40 hidden" onclick="closePopups()"></div>
+
+		<div id="info-popup" class="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 z-50 bg-black w-3/5 h-6/10 p-6 hidden">
+			<div id="info-popup-content" class="relative border-white border h-full p-6"></div>
+		</div>
+
+		<div id="searchbar" class="fixed left-1/2 top-1/3 transform -translate-x-1/2 -translate-y-1/2 z-50 bg-black w-2/8 p-4 hidden">
+			<div class="relative border-white border h-full p-4">
+				<div class="absolute -top-3 bg-black px-2 left-5">search</div>
+				<input type='text' placeholder='=P' id="searchbar-input" class="outline-none w-full"/>
+			</div>
+		</div>
+
+		<div class="relative border-white border h-full p-6">
+			<a id="title" href="completed" class="absolute -top-3 bg-black px-2 left-5 hover:underline">watchlist</a>
+			<div class="overflow-auto h-full pt-2">
+				<div id="data-grid" class="grid grid-cols-10 gap-6"></div>
+			</div>
+		</div>
+
+		<script type="module">
+			import { loadWatchlist, closePopups } from "../static/js/content.js";
+
+			window.closePopups = closePopups;
+			loadWatchlist();
+		</script>
+    </body>
+</html>
+
+{
+  "added_at": 1751046702,
+  "airing_status": "finished",
+  "continue_from": 1,
+  "description": "After the success of his crowdfunded movie featuring the woman of his dreams, Chizuru Ichinose, university student Kazuya Kinoshita resumes his life of lies and deception. Although he pretends that he has been in an ideal relationship with Chizuru for more than a year, Kazuya still mostly sees her through a rental girlfriend company's services.    However, after Kazuya attends a private party with Chizuru, he reaches the decision to finally confess his feelings to her. Unfortunately for him, his trial girlfriend Ruka Sarashina and his ex-girlfriend Mami Nanami continue to complicate his already messy attempts at romance. While he is forced to keep up his facade, Kazuya is under pressure to find a solution to his ever chaotic love life.",
+  "episode_count": 12,
+  "episode_duration": "24m",
+  "finished_at": 0,
+  "genres": "Comedy,Romance,Shounen,Harem",
+  "highlighted": 1,
+  "id": "rent-a-girlfriend-season-4-19782",
+  "message_id": "1423775061701034046",
+  "other_title": "Kanojo, Okarishimasu 4th Season",
+  "poster": "https://cdn.noitatnemucod.net/thumbnail/300x400/100/a9ed9ac7ae0d39dd6e703b446fe1f96d.jpg",
+  "status": "watchlist",
+  "title": "Rent-a-Girlfriend Season 4",
+  "type": "TV",
+  "url": "https://hianimez.to/rent-a-girlfriend-season-4-19782",
+  "version": "sub",
+  "year": 2025
+}

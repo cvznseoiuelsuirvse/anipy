@@ -1,0 +1,73 @@
+::-moz-selection {
+    color: #fff;
+    background: #999;
+}
+body {
+    font-family:
+        ui-sans-serif,
+        system-ui,
+        sans-serif,
+        Apple Color Emoji,
+        Segoe UI Emoji,
+        Segoe UI Symbol,
+        Noto Color Emoji;
+}
+
+button {
+    background: transparent;
+    border: none;
+}
+
+.navbar {
+    position: relative;
+    padding: 13px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+}
+
+.pages {
+    position: absolute;
+    left: 0;
+}
+.search-container {
+    display: flex;
+}
+
+.search-container input[type="text"] {
+    outline: none;
+    padding: 6px 8px;
+    border: 2px solid #e0e0e0;
+    background-color: #e0e0e0;
+    border-radius: 13px 0 0 13px;
+    font-size: 15px;
+    width: 400px;
+}
+
+.nav-link:hover {
+    text-decoration: underline;
+}
+
+.toggle-button {
+    border: 2px solid #e0e0e0;
+    background-color: #e0e0e0;
+    border-width: 2px;
+    font-size: 14px;
+    cursor: pointer;
+    text-align: center;
+    width: 50px;
+}
+
+.toggle-button.active {
+    background-color: transparent;
+}
+
+#toggle-1 {
+    margin-left: 4px;
+    border-right: 0;
+}
+
+#toggle-2 {
+    border-left: 0;
+    border-radius: 0 13px 13px 0;
+}
