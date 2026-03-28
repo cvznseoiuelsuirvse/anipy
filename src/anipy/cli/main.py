@@ -1,10 +1,9 @@
-import sys
 import os
 import time
 import asyncio
 import webbrowser
 
-from typing import Callable, Iterable
+from typing import Callable, Iterable, overload
 
 from ..core.types import LockFileKeys, DataList, SearchList, DataObject, SearchObject, EpisodeSources, EpisodeInfo
 from ..core.exceptions import BadHost, BadResponse
@@ -16,13 +15,10 @@ from .builder import CLIApp, ErrorTypes
 
 from .player import Player
 
-type ListType = DataList | SearchList
-
-
 data = Data()
 cfg = Config()
 hianime = HiAnimeAPI()
-ctx: ListType
+ctx: DataList | SearchList
 
 TERM_WIDTH = lambda: os.get_terminal_size().columns
 
@@ -38,17 +34,24 @@ def get_longest_values(objs: Iterable) -> dict[str, int]:
 
     return r
 
-
-def format_ctx_list(validate: Callable[[int, DataObject | SearchObject], bool] | None = None) -> str:
+@overload
+def format_ctx_list(ctx: DataList | SearchList) -> str: ...
+@overload
+def format_ctx_list(ctx: DataList, validate: Callable[[int, DataObject], bool]) -> str: ...
+@overload
+def format_ctx_list(ctx: SearchList, validate: Callable[[int, SearchObject], bool]) -> str: ...
+def format_ctx_list(ctx: DataList | SearchList, validate: Callable[[int, DataObject], bool] | Callable[[int, SearchObject], bool] | None = None) -> str:
     longest_values = get_longest_values(ctx)
     longest_index = len(str(len(ctx) - 1))
 
     ret = []
+    call_validate = lambda v, i, o: v is None or v(i, o)
     if isinstance(ctx, SearchList):
         longest_ep_count = longest_values["episode_count"]
         for i, object in enumerate(ctx):
             line = f"  {str(i):<{longest_index}}  {str(object.episode_count):>{longest_ep_count}} {object.title}"
-            if not validate or validate(i, object):
+
+            if call_validate(validate, i, object):
                 if object.id == "school-days-8757":
                     line = f"\033[7m{line}\033[0m"
                 ret.append(line)
@@ -62,7 +65,7 @@ def format_ctx_list(validate: Callable[[int, DataObject | SearchObject], bool] |
             else:
                 line = f"  {str(i):<{longest_index}}  {object.title}"
 
-            if not validate or validate(i, object):
+            if call_validate(validate, i, object):
                 if object.id == "school-days-8757":
                     line = f"\033[7m{line}\033[0m"
                 ret.append(line)
@@ -98,7 +101,7 @@ async def search(title: str):
     ctx = SearchList(resp, title)
     cli.prompt = cfg.prompt.format(ctx.name)
     if resp:
-        print(format_ctx_list())
+        print(format_ctx_list(ctx))
 
 
 @cli.on(validate={"id": lambda id: id in range(0, len(ctx))})
@@ -132,7 +135,7 @@ def watchlist():
     cli.prompt = cfg.prompt.format(ctx.name)
 
     if ctx:
-        print(format_ctx_list())
+        print(format_ctx_list(ctx))
 
 
 @cli.on(["wl-add"], {"id": lambda id: id in range(0, len(ctx))})
@@ -187,7 +190,7 @@ async def completed(part: str | None = None, n: int | None = None):
         else:
             range_to_show = range(ctx_len - n, ctx_len)
 
-        print(format_ctx_list(lambda i, _: True if i in range_to_show else False))
+        print(format_ctx_list(ctx, lambda i, _: True if i in range_to_show else False))
 
 
 @cli.on(validate={"id": lambda id: id in range(0, len(ctx))})
@@ -219,8 +222,8 @@ async def download(id: int, episode: int):
     episode_info, episode_sources = episode_
 
     try:
-        async with Player("mpv", cfg.extractor.value.headers) as player:
-            await player.get_file(episode_info, episode_sources, play=False, download=True, cut=cfg.cut)
+        async with Player(cfg.extractor.value.headers) as player:
+            await player.download_file(episode_info, episode_sources, os.getcwd())
 
     except (BadResponse, BadHost, SystemError) as ex:
         return cli.raise_err(ErrorTypes.INVALID_RESULT, str(ex))
@@ -237,8 +240,8 @@ async def play(id: int, episode: int):
     episode_info, episode_sources = episode_
 
     try:
-        async with Player("mpv", cfg.extractor.value.headers) as player:
-            await player.get_file(episode_info, episode_sources, play=True, download=False, cut=cfg.cut)
+        async with Player(cfg.extractor.value.headers) as player:
+            await player.play_file(episode_info, episode_sources)
 
     except (BadResponse, BadHost, SystemError) as ex:
         return cli.raise_err(ErrorTypes.INVALID_RESULT, str(ex))
@@ -259,8 +262,8 @@ async def play_next(id: int):
     episode_info, episode_sources = episode_
 
     try:
-        async with Player("mpv", cfg.extractor.value.headers) as player:
-            await player.get_file(episode_info, episode_sources, play=True, download=False, cut=cfg.cut)
+        async with Player(cfg.extractor.value.headers) as player:
+            await player.play_file(episode_info, episode_sources)
 
     except (BadResponse, BadHost) as ex:
         return cli.raise_err(ErrorTypes.INVALID_RESULT, str(ex))
@@ -406,12 +409,12 @@ def show_banner() -> None:
         print(f"\033[1m{b}\033[0m")
         match b:
             case "continue watching":
-                print(format_ctx_list(lambda _, object: True if object.continue_from > 1 else False))
+                print(format_ctx_list(ctx, lambda _, object: True if object.continue_from > 1 else False))
 
             case "highlighted":
-                print(format_ctx_list(lambda _, object: True if object.highlighted else False))
+                print(format_ctx_list(ctx, lambda _, object: True if object.highlighted else False))
 
-            case "info":
+            case "status":
                 watchlist_size = len(data.watchlist)
                 completed_size = len(data.completed)
                 print(f"watchlist: {watchlist_size}  completed: {completed_size}")

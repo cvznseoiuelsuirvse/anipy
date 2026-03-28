@@ -67,15 +67,10 @@ def lock_file_get_content() -> dict:
 
 
 class Config:
-    # fmt: off
     banner:     list[str]               = ["continue watching", "highlighted"]
-    download:   bool                    = False
-    cut:        bool                    = True
-    player:     Literal["mpv", "vlc"]   = "mpv"
     server:     Servers                 = Servers.VIDSTREAMING
     extractor:  Extractors              = Extractors.MEGACLOUD
     prompt:     str                     = "{} > "
-    # fmt: on
 
     def __init__(self) -> None:
         self.__path = os.path.join(get_user_config_dir(), "settings.json")
@@ -163,9 +158,6 @@ class Config:
 
     def create(self) -> dict:
         data = {
-            "download": False,
-            "cut": False,
-            "player": "mpv",
             "server": Servers.VIDSTREAMING.name,
             "extractor": Extractors.MEGACLOUD.name,
             "banner": [],

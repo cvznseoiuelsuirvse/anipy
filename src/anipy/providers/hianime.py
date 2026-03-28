@@ -3,6 +3,7 @@ import functools
 import json
 import re
 import aiohttp
+import inspect
 
 from enum import StrEnum
 from html import unescape
@@ -12,7 +13,7 @@ from ..core.exceptions import AttributeNotFound
 from ..core.types import AnimeInfo, EpisodeInfo, EpisodeSources, SearchObject, Servers
 from ..extractors import Extractors
 
-BASE_URL = "https://hianimez.to/"
+BASE_URL = "https://aniwatchtv.to/"
 
 clean = lambda h: unescape(re.sub(r"\s", " ", h))
 
@@ -24,8 +25,7 @@ def __make_key(args, kwargs):
 def cache(func):
     __cache = {}
 
-    if asyncio.iscoroutinefunction(func):
-
+    if inspect.iscoroutinefunction(func):
         @functools.wraps(func)
         async def async_wrapper(*args, **kwargs):
             key = __make_key(args, kwargs)

@@ -857,7 +857,7 @@ async def run_wasm() -> bytes:
 async def get_meta(url) -> None:
     headers = {
         "User-Agent": user_agent,
-        "Referer": "https://hianime.to/",
+        "Referer": "https://aniwatchtv.to/",
     }
 
     html_resp = await make_request(url, headers, {}, lambda i: i.text())
