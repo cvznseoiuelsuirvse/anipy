@@ -7,7 +7,7 @@ import os
 import readline
 
 from types import UnionType
-from typing import Callable, Any, get_args
+from typing import Awaitable, Callable, Any, get_args
 from enum import IntEnum
 
 

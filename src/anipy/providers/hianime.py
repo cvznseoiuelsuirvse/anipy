@@ -1,69 +1,27 @@
-import asyncio
-import functools
 import json
 import re
 import aiohttp
-import inspect
 
 from enum import StrEnum
 from html import unescape
 from typing import overload, Literal, Awaitable, Callable, TypeVar
 
-from ..core.exceptions import AttributeNotFound
-from ..core.types import AnimeInfo, EpisodeInfo, EpisodeSources, SearchObject, Servers
-from ..extractors import Extractors
+from ..core.types import Servers
+from ..core.exceptions import ProviderRequestFailed
+from ..extractors import Megacloud
 
 BASE_URL = "https://aniwatchtv.to/"
+HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0"}
 
 clean = lambda h: unescape(re.sub(r"\s", " ", h))
 
 
-def __make_key(args, kwargs):
-    return (args, tuple(sorted(kwargs.items())))
-
-
-def cache(func):
-    __cache = {}
-
-    if inspect.iscoroutinefunction(func):
-        @functools.wraps(func)
-        async def async_wrapper(*args, **kwargs):
-            key = __make_key(args, kwargs)
-            if key in __cache:
-                return __cache[key]
-
-            value = await func(*args, **kwargs)
-            __cache[key] = value
-
-            return value
-
-        return async_wrapper
-
-    else:
-
-        @functools.wraps(func)
-        def sync_wrapper(*args, **kwargs):
-            key = __make_key(args, kwargs)
-
-            if key in __cache:
-                return __cache[key]
-
-            value = func(*args, **kwargs)
-            __cache[key] = value
-
-            return value
-
-        return sync_wrapper
-
-
 async def make_request[T](route: str, params: dict, func: Callable[[aiohttp.ClientResponse], Awaitable[T]]) -> T:
     url = BASE_URL + route
-    headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0"}
 
     async with aiohttp.ClientSession() as client:
-        async with client.get(url, headers=headers, params=params) as resp:
+        async with client.get(url, headers=HEADERS, params=params) as resp:
             return await func(resp)
-
 
 class Patterns(StrEnum):
     CARD = r"<div class=\"flw-item\">(.+?)<div class=\"clearfix\"><\/div>"
@@ -118,7 +76,7 @@ def _re(pattern: "Patterns", string: str, *, all: bool = False, default: T = DEF
 
     if not v and default is DEFAULT:
         msg = f"{pattern.name} not found"
-        raise ValueError(msg)
+        raise ProviderRequestFailed(msg)
 
     elif not v:
         return default
@@ -126,7 +84,15 @@ def _re(pattern: "Patterns", string: str, *, all: bool = False, default: T = DEF
     return v
 
 
-class Provider:
+class HiAnime:
+    @property
+    def headers(self) -> dict:
+        return HEADERS
+
+    @property
+    def extractor_headers(self) -> dict:
+        return Megacloud.headers
+
     def _card_scraper(self, card: str) -> dict:
         ret = {}
         card = clean(card)
@@ -151,8 +117,8 @@ class Provider:
 
         return ret
 
-    async def search(self, query: str, page: int) -> list[dict]:
-        params = {"keyword": query, "page": page}
+    async def search(self, title: str) -> list[dict]:
+        params = {"keyword": title, "page": 1}
         html_page = await make_request("search", params, lambda r: r.text())
         html_page = re.sub(r"\s", " ", html_page)
 
@@ -180,10 +146,10 @@ class Provider:
 
         return ret
 
-    async def get_anime_info(self, anime_id: str) -> dict:
+    async def get_anime_info(self, id: str) -> dict:
         ret = {}
 
-        html_page = await make_request(anime_id, {}, lambda r: r.text())
+        html_page = await make_request(id, {}, lambda r: r.text())
         html_page = clean(html_page)
 
         anis_content = _re(Patterns.ANIS_CONTENT, html_page).group(1)
@@ -194,13 +160,13 @@ class Provider:
         poster = _re(Patterns.POSTER, anis_content)
 
         sub_count = _re(Patterns.EPISODE_COUNT, anis_content, default=None)
-        ret["id"] = anime_id
+        ret["id"] = id
         ret["title"] = dynamic_name["title"]
         ret["other_title"] = dynamic_name["jtitle"]
 
         ret["episode_count"] = int(sub_count.group(1)) if sub_count is not None else 0
 
-        ret["url"] = BASE_URL + anime_id
+        ret["url"] = BASE_URL + id
         ret["poster"] = poster.group("src")
 
         items = _re(Patterns.ITEM, anisc_detail, all=True)
@@ -229,64 +195,32 @@ class Provider:
                 status = re.sub(r" ?air\w+ ?", "", value.lower())
                 ret["airing_status"] = status.strip()
 
-        ret["episodes"] = await self._get_episode_list(anime_id)
+        ret["episodes"] = await self._get_episode_list(id)
 
         return ret
 
-    async def get_episode_sources(self, episode_id: str, extractor: Extractors, server: Servers) -> dict:
-        if extractor == Extractors.MEGACLOUD:
-            resp = await make_request("ajax/v2/episode/servers", {"episodeId": episode_id}, lambda i: i.text())
+    async def get_episode_sources(self, id: str) -> dict:
+        resp = await make_request("ajax/v2/episode/servers", {"episodeId": id}, lambda i: i.text())
 
-            html_page: str = json.loads(resp)["html"]
-            html_page = html_page.replace(r"\"", '"')
-            html_page = clean(html_page)
+        html_page: str = json.loads(resp)["html"]
+        html_page = html_page.replace(r"\"", '"')
+        html_page = clean(html_page)
 
-            servers = _re(Patterns.SERVER, html_page, all=True)
+        servers = _re(Patterns.SERVER, html_page, all=True)
 
-            for s in servers:
-                server_id = s[1]
+        for s in servers:
+            server_id = s[1]
 
-                if server_id == server:
-                    source_id = s[0]
-                    break
-
-            else:
-                raise AttributeNotFound("source id not found")
-
-            resp = await make_request("ajax/v2/episode/sources", {"id": source_id}, lambda i: i.text())
-            video_url = json.loads(resp)["link"]
-
-            megacloud_extractor = extractor.value
-            e = megacloud_extractor(video_url)
-            ep_info = await e.extract()
+            if server_id == Servers.VIDSTREAMING:
+                source_id = s[0]
+                break
 
         else:
-            megaplay_extractor = extractor.value
-            e = megaplay_extractor(episode_id)
-            ep_info = await e.extract()
+            raise ValueError("source id not found")
 
-        return ep_info
+        resp = await make_request("ajax/v2/episode/sources", {"id": source_id}, lambda i: i.text())
+        video_url = json.loads(resp)["link"]
 
+        e = Megacloud(video_url)
+        return await e.extract()
 
-class HiAnimeAPI:
-    def __init__(self):
-        self.provider = Provider()
-
-    @cache
-    async def search(self, title: str, page: int = 1) -> list[SearchObject]:
-        resp = await self.provider.search(title, page)
-        return [SearchObject(r) for r in resp]
-
-    @cache
-    async def get_anime_info(self, anime_id: str) -> AnimeInfo:
-        resp = await self.provider.get_anime_info(anime_id)
-        episodes = [EpisodeInfo(ep) for ep in resp["episodes"]]
-        resp["episodes"] = episodes
-        return AnimeInfo(**resp)
-
-    @cache
-    async def get_episode_sources(self, episode_id: str, extractor: Extractors, server: Servers) -> EpisodeSources:
-        ep_sources = await self.provider.get_episode_sources(episode_id, extractor, server)
-        ep_sources = EpisodeSources(**ep_sources)
-
-        return ep_sources

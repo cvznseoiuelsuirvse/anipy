@@ -6,10 +6,10 @@ import webbrowser
 from typing import Callable, Iterable, overload
 
 from ..core.types import LockFileKeys, DataList, SearchList, DataObject, SearchObject, EpisodeSources, EpisodeInfo
-from ..core.exceptions import BadHost, BadResponse
+from ..core.exceptions import BadHost, BadResponse, ProviderRequestFailed
 from ..core.data import Data, Config, lock_file_update, lock_file_get_content
 from ..core.util import resolve_to_mal
-from ..providers.hianime import HiAnimeAPI
+from ..providers import Provider
 from .builder import CLIApp, ErrorTypes
 
 
@@ -17,7 +17,7 @@ from .player import Player
 
 data = Data()
 cfg = Config()
-hianime = HiAnimeAPI()
+provider = Provider(cfg.provider.cls)
 ctx: DataList | SearchList
 
 TERM_WIDTH = lambda: os.get_terminal_size().columns
@@ -61,7 +61,7 @@ def format_ctx_list(ctx: DataList | SearchList, validate: Callable[[int, DataObj
             if object.highlighted:
                 line = f"* {str(i):<{longest_index}}  {object.title}"
             elif object.continue_from > 1:
-                line = f"> {str(i):<{longest_index}}  {object.title} -> {object.continue_from}/{object.episode_count}"
+                line = f"> {str(i):<{longest_index}}  {object.title} {object.continue_from}/{object.episode_count}"
             else:
                 line = f"  {str(i):<{longest_index}}  {object.title}"
 
@@ -78,15 +78,61 @@ async def get_episode(*, id: int, episode: int) -> tuple[EpisodeInfo, EpisodeSou
     if episode not in range(1, object.episode_count + 1):
         return cli.raise_err(ErrorTypes.INVALID_ARGS, "episode must be withing available episodes")
 
-    extractor = cfg.extractor
-    anime_info = await hianime.get_anime_info(object.id)
+    anime_info = await provider.get_anime_info(object.id)
 
     episode_info = anime_info.episodes[episode - 1]
     episode_id = episode_info.id
 
-    episode_sources = await hianime.get_episode_sources(episode_id, extractor, cfg.server)
+    episode_sources = await provider.get_episode_sources(episode_id)
 
     return episode_info, episode_sources
+
+async def update_watchlist(force: bool) -> None:
+    async def uw(obj: DataObject):
+        obj_new = await provider.get_anime_info(obj.id)
+
+        for k, v in obj_new.json().items():
+            if not k.startswith("_") and hasattr(obj, k):
+                if isinstance(v, list):
+                    v = ",".join(v)
+
+                setattr(obj, k, v)
+
+        await data.update(obj)
+
+    wl_last_updated = lock_file_get_content().get(LockFileKeys.WATCHLIST_LAST_REFRESH, 0)
+
+    if force or int(time.time()) - wl_last_updated >= 86400:
+        tasks = [uw(obj) for obj in data.watchlist if obj.airing_status == "currently"]
+        try:
+            await asyncio.gather(*tasks)
+
+        except ProviderRequestFailed:
+            return cli.raise_err(ErrorTypes.INVALID_RESULT, "failed to update watchlist")
+
+        finally:
+            lock_file_update(LockFileKeys.WATCHLIST_LAST_REFRESH, int(time.time()))
+
+
+def show_banner() -> None:
+    if cfg.banner:
+        print()
+
+    for b in cfg.banner:
+        print(f"\033[1m{b}\033[0m")
+        match b:
+            case "continue watching":
+                print(format_ctx_list(ctx, lambda _, object: True if object.continue_from > 1 else False))
+
+            case "highlighted":
+                print(format_ctx_list(ctx, lambda _, object: True if object.highlighted else False))
+
+            case "status":
+                watchlist_size = len(data.watchlist)
+                completed_size = len(data.completed)
+                print(f"watchlist: {watchlist_size}  completed: {completed_size}")
+
+        print()
 
 
 cli = CLIApp()
@@ -97,7 +143,12 @@ async def search(title: str):
     """search for an anime"""
     global ctx
 
-    resp = await hianime.search(title)
+    try:
+        resp = await provider.search(title)
+
+    except ProviderRequestFailed:
+        return cli.raise_err(ErrorTypes.INVALID_RESULT, "failed to get search results")
+
     ctx = SearchList(resp, title)
     cli.prompt = cfg.prompt.format(ctx.name)
     if resp:
@@ -107,7 +158,7 @@ async def search(title: str):
 @cli.on(validate={"id": lambda id: id in range(0, len(ctx))})
 async def mal_search(id: int):
     """find anime on MAL"""
-    title = ctx[id]
+    title = ctx[id].title
 
     url = f"https://myanimelist.net/anime.php?q={title}&cat=anime"
     webbrowser.open(url)
@@ -144,7 +195,7 @@ async def watchlist_add(id: int):
     if not isinstance(ctx, SearchList):
         return cli.raise_err(ErrorTypes.INVALID_CONTEXT, "context must be Search type")
 
-    object_info = await hianime.get_anime_info(ctx[id].id)
+    object_info = await provider.get_anime_info(ctx[id].id)
     object_info_json = object_info.json()
 
     object_info_json.pop("episodes")
@@ -222,14 +273,14 @@ async def download(id: int, episode: int):
     episode_info, episode_sources = episode_
 
     try:
-        async with Player(cfg.extractor.value.headers) as player:
+        async with Player(provider.headers) as player:
             await player.download_file(episode_info, episode_sources, os.getcwd())
 
     except (BadResponse, BadHost, SystemError) as ex:
         return cli.raise_err(ErrorTypes.INVALID_RESULT, str(ex))
 
 
-@cli.on(["p"], {"id": lambda id: id in range(0, len(ctx))})
+@cli.on(["p", "play"], {"id": lambda id: id in range(0, len(ctx))})
 async def play(id: int, episode: int):
     """play specified episode. this command won't increment continue_from, dehighlight, and move to completed (if last episode was played)"""
     episode_ = await get_episode(id=id, episode=episode)
@@ -247,7 +298,7 @@ async def play(id: int, episode: int):
         return cli.raise_err(ErrorTypes.INVALID_RESULT, str(ex))
 
 
-@cli.on(["p-next"], {"id": lambda id: id in range(0, len(ctx))})
+@cli.on(["p-next", "play-next"], {"id": lambda id: id in range(0, len(ctx))})
 async def play_next(id: int):
     """play next episode"""
     if not isinstance(ctx, DataList):
@@ -301,7 +352,7 @@ async def info(id: int, keys: list[str] | None = None):
         return new_str.strip()
 
     if isinstance(ctx, SearchList):
-        object = await hianime.get_anime_info(object.id)
+        object = await provider.get_anime_info(object.id)
 
     object_json = object.json()
     keys = keys or list(object_json.keys())
@@ -378,49 +429,10 @@ async def reset(id: int):
 
     await data.update(obj)
 
-
-async def update_watchlist() -> None:
-    async def uw(obj: DataObject):
-        obj_new = await hianime.get_anime_info(obj.id)
-
-        for k, v in obj_new.json().items():
-            if not k.startswith("_") and hasattr(obj, k):
-                if isinstance(v, list):
-                    v = ",".join(v)
-
-                setattr(obj, k, v)
-
-        await data.update(obj)
-
-    wl_last_updated = lock_file_get_content().get(LockFileKeys.WATCHLIST_LAST_REFRESH, 0)
-
-    if int(time.time()) - wl_last_updated >= 86400:
-        tasks = [uw(obj) for obj in data.watchlist if obj.airing_status == "currently"]
-        await asyncio.gather(*tasks)
-
-        lock_file_update(LockFileKeys.WATCHLIST_LAST_REFRESH, int(time.time()))
-
-
-def show_banner() -> None:
-    if cfg.banner:
-        print()
-
-    for b in cfg.banner:
-        print(f"\033[1m{b}\033[0m")
-        match b:
-            case "continue watching":
-                print(format_ctx_list(ctx, lambda _, object: True if object.continue_from > 1 else False))
-
-            case "highlighted":
-                print(format_ctx_list(ctx, lambda _, object: True if object.highlighted else False))
-
-            case "status":
-                watchlist_size = len(data.watchlist)
-                completed_size = len(data.completed)
-                print(f"watchlist: {watchlist_size}  completed: {completed_size}")
-
-        print()
-
+@cli.on()
+async def refresh():
+    """refresh watchlist"""
+    await update_watchlist(True)
 
 async def main_():
     global ctx
@@ -429,7 +441,7 @@ async def main_():
 
     ctx = data.watchlist
     cli.prompt = cfg.prompt.format(ctx.name)
-    await update_watchlist()
+    await update_watchlist(False)
 
     show_banner()
     await cli.run()

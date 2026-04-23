@@ -7,11 +7,11 @@ import time
 
 from typing import Generator, Literal, get_origin, get_args, AsyncGenerator
 
-from .types import Servers, DataObject, DataList, LockFileKeys, Serializable
-from ..extractors import Extractors
-from .exceptions import BadResponse, EnvVarNotFound
+from .types import DataObject, DataList, LockFileKeys, Serializable
+from .exceptions import BadResponse
+from ..providers import ProviderTypes
 
-from .util import compress_data, decompress_data, get_user_id
+from .util import compress_data, decompress_data
 
 from ..integrations.discord import DiscordAPI
 from ..integrations.webhook import Webhook, Body
@@ -68,8 +68,7 @@ def lock_file_get_content() -> dict:
 
 class Config:
     banner:     list[str]               = ["continue watching", "highlighted"]
-    server:     Servers                 = Servers.VIDSTREAMING
-    extractor:  Extractors              = Extractors.MEGACLOUD
+    provider:   ProviderTypes           = ProviderTypes.HIANIME
     prompt:     str                     = "{} > "
 
     def __init__(self) -> None:
@@ -80,15 +79,11 @@ class Config:
             with open(self.__path, "r") as f:
                 self.__obj = json.load(f)
                 for k, v in self.__obj.items():
-                    match k:
-                        case "extractor":
-                            setattr(self, k, Extractors[v])
+                    if k == "provider":
+                        setattr(self, k, ProviderTypes[v])
 
-                        case "server":
-                            setattr(self, k, Servers[v])
-
-                        case _:
-                            setattr(self, k, v)
+                    else:
+                        setattr(self, k, v)
 
     def _get_annotations(self) -> dict:
         res = {}
@@ -158,8 +153,6 @@ class Config:
 
     def create(self) -> dict:
         data = {
-            "server": Servers.VIDSTREAMING.name,
-            "extractor": Extractors.MEGACLOUD.name,
             "banner": [],
         }
 
@@ -195,10 +188,11 @@ class DB:
         self.con.row_factory = sqlite3.Row
 
     def create(self, table: str, fields: dict) -> None:
-        columns = ",\n\t".join([f"{k} {v}" for k, v in fields.items()])
+        columns = ",\n\t".join([f"{k} {v}" if v is not None else k for k, v in fields.items()])
         query = f"CREATE TABLE IF NOT EXISTS {table} (\n    {columns}\n);"
 
         self.con.execute(query)
+        self.con.commit()
 
     def select(self, table: str, condition: Condition | None = None) -> list[dict]:
         if condition:
@@ -257,11 +251,11 @@ class LocalDB:
         self.__db = DB(self.__path)
         self.__table = "data"
 
-        try:
-            self.__db.select(self.__table)
+        self.__main_table = "data"
+        self.__ids_table =  "ids"
 
-        except sqlite3.OperationalError:
-            self.create()
+        self._create_main_table()
+        self._create_ids_table()
 
     def pull(self) -> Generator[DataObject, None, None]:
         for o in self.__db.select(self.__table):
@@ -286,9 +280,9 @@ class LocalDB:
     def remove(self, object: DataObject) -> None:
         self.__db.delete(self.__table, Condition("id", "=", [object.id]))
 
-    def create(self) -> None:
+    def _create_ids_table(self) -> None:
         self.__db.create(
-            self.__table,
+            self.__ids_table,
             {
                 "id": "TEXT PRIMARY KEY",
                 "title": "TEXT NOT NULL",
@@ -311,6 +305,20 @@ class LocalDB:
             },
         )
 
+    def _create_main_table(self) -> None:
+        self.__db.create(
+            self.__main_table,
+            {
+                "id": "INTEGER",
+                "provider": "TEXT NOT NULL",
+                "external_id": "TEXT NOT NULL",
+                "PRIMARY KEY (provider, external_id)": None,
+                "FOREIGN KEY (id) REFERENCES data(id)": None,
+            },
+        )
+
+
+class MalDB: ...
 
 class DiscordDB:
     def __init__(self) -> None:
@@ -318,7 +326,7 @@ class DiscordDB:
 
         for e in env_vars:
             if not os.getenv(e):
-                raise EnvVarNotFound(f"'{e}' environment variable isn't set")
+                raise SystemError(f"'{e}' environment variable isn't set")
 
         self.__wh = Webhook(os.environ["ANIPY_DATA_WEBHOOK"])
         self.__d = DiscordAPI(os.environ["ANIPY_DISCORD_TOKEN"])
@@ -474,3 +482,6 @@ class Data:
 
         ts = await self.remote.update_last_updated()
         lock_file_update(LockFileKeys.DB_LAST_UPDATE, ts)
+
+
+if __name__ == "__main__": ...

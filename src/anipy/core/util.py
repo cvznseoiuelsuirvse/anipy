@@ -4,6 +4,8 @@ import bs4
 import base64
 import os
 import json
+import inspect
+import functools
 
 
 def get_user_id() -> int:
@@ -58,3 +60,41 @@ def decompress_data(data: str) -> dict:
     data_compressed = base64.b64decode(data)
     data_string = zlib.decompress(data_compressed).decode()
     return json.loads(data_string)
+
+def __make_key(args, kwargs):
+    return (args, tuple(sorted(kwargs.items())))
+
+def cache(func):
+    __cache = {}
+
+    if inspect.iscoroutinefunction(func):
+        @functools.wraps(func)
+        async def async_wrapper(*args, **kwargs):
+            key = __make_key(args, kwargs)
+            if key in __cache:
+                return __cache[key]
+
+            value = await func(*args, **kwargs)
+            __cache[key] = value
+
+            return value
+
+        return async_wrapper
+
+    else:
+
+        @functools.wraps(func)
+        def sync_wrapper(*args, **kwargs):
+            key = __make_key(args, kwargs)
+
+            if key in __cache:
+                return __cache[key]
+
+            value = func(*args, **kwargs)
+            __cache[key] = value
+
+            return value
+
+        return sync_wrapper
+
+

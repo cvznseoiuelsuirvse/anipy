@@ -5,6 +5,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import base64
 
 from typing import Awaitable, Callable
 
@@ -36,7 +37,7 @@ class Player:
         # self.clean()
 
     async def _make_request[T](self, method: str, url: str, func: Callable[[aiohttp.ClientResponse], Awaitable[T]]) -> T:
-        print(url)
+        # print(url)
         try:
             async with self.__session.request(method.upper(), url, headers=self.headers) as resp:
                 if resp.status not in [200, 520]:
@@ -49,11 +50,18 @@ class Player:
 
     async def _write_segment(self, id: str, url: str) -> None:
         pattern = r"seg-(\d+)"
-        m = re.search(pattern, url)
+        url_filename = url.rsplit('/', maxsplit=1)[1]
 
-        assert m
-        seg_num = m.group(1)
-        path = os.path.join(self.__main_dir, f"{id}_seg{seg_num}")
+        if url_filename.startswith("c2VnL"):
+            url_filename = base64.b64decode(url_filename).decode()
+
+        m = re.search(pattern, url_filename)
+        if not m:
+            print(url_filename)
+            assert m
+
+        filename = f"{id}_seg{m.group(1)}"
+        path = os.path.join(self.__main_dir, filename)
 
         async def _write(resp: aiohttp.ClientResponse):
             with open(path, "wb") as f:
@@ -77,7 +85,7 @@ class Player:
         return master_response, vid
 
     async def _extract_segments(self, master_url: str) -> list[str]:
-        segments_pattern = r"EXTINF:[\d\.]+,\n(.*?(seg[\w\-\.]+))"
+        segments_pattern = r"EXTINF:[\d\.]+,\n([^\n]+)"
         segment_urls = []
 
         base_url = master_url.rsplit("/", 1)[0]
@@ -85,18 +93,20 @@ class Player:
         _, vid = await self._get_master_file(master_url)
         filename = vid.group(3)
 
-        index_url = f"{base_url}/{filename}"
+        if filename.startswith("https://"):
+            index_url = filename
+        else:
+            index_url = f"{base_url}/{filename}"
+
         index_file_content = await self._make_request("get", index_url, lambda e: e.text())
 
         for m in re.finditer(segments_pattern, index_file_content):
-            full_url = m.group(1)
-            segment = m.group(2)
+            segment = m.group(1)
 
-            if len(full_url) < 285:
-                segment_urls.append(f"{base_url}/{segment}")
-
+            if segment.startswith("https://"):
+                segment_urls.append(segment)
             else:
-                segment_urls.append(full_url)
+                segment_urls.append(f"{base_url}/{segment}")
 
         return segment_urls
 
@@ -148,13 +158,18 @@ class Player:
         # args.append("--http-proxy=http://127.0.0.1:8080")
 
         args.append(video_file)
-        subprocess.run(args, stdout=subprocess.DEVNULL)
+        proc = subprocess.run(args, capture_output=True)
+        if proc.returncode != 0:
+            print(proc.stdout)
+        # subprocess.run(args)
 
     def generate_filename(self, ep_info: EpisodeInfo) -> str:
         title = re.sub(r"\W", "", ep_info.title)
         return f"{title}_{ep_info.num}"
 
     async def download_file(self, ep_info: EpisodeInfo, ep_sources: EpisodeSources, output_dir: str) -> None:
+        print(f"{ep_info.num} {ep_info.title}")
+
         filename_base = self.generate_filename(ep_info)
         filename_base = filename_base.replace("'", "\\'")
 
