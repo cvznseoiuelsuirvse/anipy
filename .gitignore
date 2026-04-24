@@ -4,6 +4,7 @@ build/
 dist/
 wheels/
 web/
+extractors/
 ts/
 package*.json
 *.config.js

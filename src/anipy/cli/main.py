@@ -9,15 +9,14 @@ from ..core.types import LockFileKeys, DataList, SearchList, DataObject, SearchO
 from ..core.exceptions import BadHost, BadResponse, ProviderRequestFailed
 from ..core.data import Data, Config, lock_file_update, lock_file_get_content
 from ..core.util import resolve_to_mal
-from ..providers import Provider
 from .builder import CLIApp, ErrorTypes
 
 
 from .player import Player
 
-data = Data()
-cfg = Config()
-provider = Provider(cfg.provider.cls)
+cfg =      Config()
+data =     Data(cfg.provider)
+provider = cfg.provider.cls()
 ctx: DataList | SearchList
 
 TERM_WIDTH = lambda: os.get_terminal_size().columns
@@ -52,8 +51,6 @@ def format_ctx_list(ctx: DataList | SearchList, validate: Callable[[int, DataObj
             line = f"  {str(i):<{longest_index}}  {str(object.episode_count):>{longest_ep_count}} {object.title}"
 
             if call_validate(validate, i, object):
-                if object.id == "school-days-8757":
-                    line = f"\033[7m{line}\033[0m"
                 ret.append(line)
 
     else:
@@ -73,23 +70,20 @@ def format_ctx_list(ctx: DataList | SearchList, validate: Callable[[int, DataObj
     return "\n".join(ret)
 
 
-async def get_episode(*, id: int, episode: int) -> tuple[EpisodeInfo, EpisodeSources] | None:
+async def get_episode(*, id: int, episode: int) -> EpisodeSources | None:
     object = ctx[id]
     if episode not in range(1, object.episode_count + 1):
         return cli.raise_err(ErrorTypes.INVALID_ARGS, "episode must be withing available episodes")
 
-    anime_info = await provider.get_anime_info(object.id)
+    await check_external_id(object)
+    anime_info = await provider.get_anime_info(object.external_id)
+    episode_sources = await provider.get_episode_sources(anime_info.external_id, episode)
 
-    episode_info = anime_info.episodes[episode - 1]
-    episode_id = episode_info.id
-
-    episode_sources = await provider.get_episode_sources(episode_id)
-
-    return episode_info, episode_sources
+    return episode_sources
 
 async def update_watchlist(force: bool) -> None:
     async def uw(obj: DataObject):
-        obj_new = await provider.get_anime_info(obj.id)
+        obj_new = await provider.get_anime_info(obj.external_id)
 
         for k, v in obj_new.json().items():
             if not k.startswith("_") and hasattr(obj, k):
@@ -98,7 +92,7 @@ async def update_watchlist(force: bool) -> None:
 
                 setattr(obj, k, v)
 
-        await data.update(obj)
+        data.update(obj)
 
     wl_last_updated = lock_file_get_content().get(LockFileKeys.WATCHLIST_LAST_REFRESH, 0)
 
@@ -133,6 +127,18 @@ def show_banner() -> None:
                 print(f"watchlist: {watchlist_size}  completed: {completed_size}")
 
         print()
+
+async def check_external_id(obj: SearchObject | DataObject) -> None:
+    if isinstance(obj, SearchObject) or obj.external_id: return
+
+    resp = await provider.search(obj.title)
+
+    for a in resp:
+        if a.title == obj.title or a.other_title == obj.other_title:
+            data.add_id(obj, a.external_id)
+            return
+
+    raise ValueError("failed to get external_id")
 
 
 cli = CLIApp()
@@ -195,7 +201,7 @@ async def watchlist_add(id: int):
     if not isinstance(ctx, SearchList):
         return cli.raise_err(ErrorTypes.INVALID_CONTEXT, "context must be Search type")
 
-    object_info = await provider.get_anime_info(ctx[id].id)
+    object_info = await provider.get_anime_info(ctx[id].external_id)
     object_info_json = object_info.json()
 
     object_info_json.pop("episodes")
@@ -203,20 +209,20 @@ async def watchlist_add(id: int):
     object_info_json["genres"] = ",".join(object_info.genres)
     object_info_json["status"] = "watchlist"
 
-    await data.add(DataObject(object_info_json))
+    data.add(DataObject(object_info_json))
 
 
 @cli.on(["wl-rm"], {"id": lambda id: id in range(0, len(ctx))})
-async def watchlist_remove(id: int):
+def watchlist_remove(id: int):
     """remove anime from watchlist"""
     if not isinstance(ctx, DataList):
         return cli.raise_err(ErrorTypes.INVALID_CONTEXT, "context must be Data type")
 
-    await data.remove(ctx[id])
+    data.remove(ctx[id])
 
 
 @cli.on(["comp"], {"part": lambda part: part in ["head", "tail", "all"]})
-async def completed(part: str | None = None, n: int | None = None):
+def completed(part: str | None = None, n: int | None = None):
     """show completed list. part: head/tail/all. n: number of rows to show. if not arguments specified it will show last 10 rows"""
     global ctx
     ctx = data.completed
@@ -245,36 +251,34 @@ async def completed(part: str | None = None, n: int | None = None):
 
 
 @cli.on(validate={"id": lambda id: id in range(0, len(ctx))})
-async def highlight(id: int):
+def highlight(id: int):
     """highlight anime in watchlist"""
 
     object = data.watchlist[id]
     object.highlighted = True
-    await data.update(object)
+    data.update(object)
 
 
 @cli.on(validate={"id": lambda id: id in range(0, len(ctx))})
-async def dehighlight(id: int):
+def dehighlight(id: int):
     """dehighlight anime in watchlist"""
 
     object = data.watchlist[id]
     object.highlighted = False
-    await data.update(object)
+    data.update(object)
 
 
 @cli.on(["d"], {"id": lambda id: id in range(0, len(ctx))})
 async def download(id: int, episode: int):
     """download an episode"""
-    episode_ = await get_episode(id=id, episode=episode)
-    if not episode_:
+    episode_sources = await get_episode(id=id, episode=episode)
+    if not episode_sources:
         cli.raise_err(ErrorTypes.REQUEST_ERROR, "failed to get episode")
         return
 
-    episode_info, episode_sources = episode_
-
     try:
-        async with Player(provider.headers) as player:
-            await player.download_file(episode_info, episode_sources, os.getcwd())
+        async with Player(provider.extractor_headers) as player:
+            await player.download_file(episode_sources, os.getcwd())
 
     except (BadResponse, BadHost, SystemError) as ex:
         return cli.raise_err(ErrorTypes.INVALID_RESULT, str(ex))
@@ -283,16 +287,14 @@ async def download(id: int, episode: int):
 @cli.on(["p", "play"], {"id": lambda id: id in range(0, len(ctx))})
 async def play(id: int, episode: int):
     """play specified episode. this command won't increment continue_from, dehighlight, and move to completed (if last episode was played)"""
-    episode_ = await get_episode(id=id, episode=episode)
-    if not episode_:
+    episode_sources = await get_episode(id=id, episode=episode)
+    if not episode_sources:
         cli.raise_err(ErrorTypes.REQUEST_ERROR, "failed to get episode")
         return
 
-    episode_info, episode_sources = episode_
-
     try:
-        async with Player(cfg.extractor.value.headers) as player:
-            await player.play_file(episode_info, episode_sources)
+        async with Player(provider.extractor_headers) as player:
+            await player.play_file(episode_sources)
 
     except (BadResponse, BadHost, SystemError) as ex:
         return cli.raise_err(ErrorTypes.INVALID_RESULT, str(ex))
@@ -306,15 +308,14 @@ async def play_next(id: int):
 
     object = ctx[id]
     episode = object.continue_from
-    episode_ = await get_episode(id=id, episode=episode)
-    if not episode_:
+
+    episode_sources = await get_episode(id=id, episode=episode)
+    if not episode_sources:
         return
 
-    episode_info, episode_sources = episode_
-
     try:
-        async with Player(cfg.extractor.value.headers) as player:
-            await player.play_file(episode_info, episode_sources)
+        async with Player(provider.extractor_headers) as player:
+            await player.play_file(episode_sources)
 
     except (BadResponse, BadHost) as ex:
         return cli.raise_err(ErrorTypes.INVALID_RESULT, str(ex))
@@ -332,7 +333,7 @@ async def play_next(id: int):
                 object.status = "completed"
                 object.continue_from = 1
 
-            await data.update(object)
+            data.update(object)
 
 
 @cli.on(["i"], {"id": lambda id: id in range(0, len(ctx))})
@@ -351,8 +352,8 @@ async def info(id: int, keys: list[str] | None = None):
 
         return new_str.strip()
 
-    if isinstance(ctx, SearchList):
-        object = await provider.get_anime_info(object.id)
+    await check_external_id(object)
+    object = await provider.get_anime_info(object.external_id)
 
     object_json = object.json()
     keys = keys or list(object_json.keys())
@@ -413,7 +414,7 @@ def config():
 
 
 @cli.on(validate={"id": lambda id: id in range(0, len(ctx))})
-async def reset(id: int):
+def reset(id: int):
     """reset an anime by putting it back to watchlist from completed (if completed), and setting continue_from to 1"""
 
     if isinstance(ctx, SearchList):
@@ -427,7 +428,7 @@ async def reset(id: int):
         obj.finished_at = 0
         obj.added_at = int(time.time())
 
-    await data.update(obj)
+    data.update(obj)
 
 @cli.on()
 async def refresh():
@@ -437,7 +438,7 @@ async def refresh():
 async def main_():
     global ctx
 
-    await data.load()
+    data.load()
 
     ctx = data.watchlist
     cli.prompt = cfg.prompt.format(ctx.name)

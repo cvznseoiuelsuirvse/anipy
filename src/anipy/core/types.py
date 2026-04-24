@@ -3,16 +3,16 @@ from typing import Any, Literal
 from dataclasses import dataclass
 
 type Serializable = str | int | list | dict
+type AiringStatus = Literal["finished", "airing"]
+type ItemStatus =   Literal["completed", "watchlist"]
 
 
-@dataclass
 class BaseObject:
     def __init__(self, obj: dict = {}) -> None:
         self.__obj = obj
 
         for k, v in self.__obj.items():
-            if k != "version":
-                setattr(self, k, v)
+            setattr(self, k, v)
 
     def json(self) -> dict[str, Any]:
         d = {}
@@ -25,80 +25,67 @@ class BaseObject:
         return d
 
 
-class EpisodeSources:
-    sources: list[dict]
-    tracks: list[dict]
-    intro: tuple[int, int]
-    outro: tuple[int, int]
-
-    def __init__(self, **kwargs) -> None:
-        for k, v in kwargs.items():
-            setattr(self, k, v)
-
-    def attrs(self) -> list[str]:
-        attrs = [i for i in dir(self) if not callable(getattr(self, i)) and not i.startswith("_")]
-        return attrs
-
+@dataclass
+class EpisodeSources(BaseObject):
+    source:     str
+    tracks:     list[dict]
+    intro:      tuple[int, int]
+    outro:      tuple[int, int]
 
 class EpisodeInfo(BaseObject):
-    id: str
-    title: str
-    other_title: str
-    num: int
+    id:                 str
+    title:              str
+    other_title:        str
+    num:                int
 
-
+@dataclass
 class AnimeInfo(BaseObject):
-    id: str
-    title: str
-    other_title: str
-    episode_count: int
-    airing_status: str
-    url: str
-    poster: str
-    type: str
-    episode_duration: str
-    description: str
-    genres: list[str]
-    year: int
-    episodes: list[EpisodeInfo]
+    external_id:        str
 
-    def __init__(self, **kwargs) -> None:
-        for k, v in kwargs.items():
-            setattr(self, k, v)
+    title:              str
+    other_title:        str
 
-    def __getattr__(self, _: str) -> Any: ...
+    description:        str
+    year:               int
+    genres:             list[str]
+    airing_status:      AiringStatus
+    type:               str
+
+    episode_count:      int
+    episode_duration:   int
+
+    # episodes:           list[EpisodeInfo]
 
 
+@dataclass
 class SearchObject(BaseObject):
-    id: str
-    title: str
-    other_title: str
-    episode_count: int
-    episode_duration: str
-    type: str
-    poster: str
-    status: str = "search"
-
+    external_id:        str
+    title:              str
+    other_title:        str
+    episode_count:      int
+    episode_duration:   int
+    type:               str
 
 class DataObject(BaseObject):
-    id: str
-    url: str
-    title: str
-    other_title: str
-    episode_count: int
-    airing_status: str
-    type: str
-    year: int
-    episode_duration: str
-    description: str
-    genres: str
-    poster: str
-    status: Literal["watchlist", "completed"]
-    added_at: int
-    highlighted: bool = False
-    continue_from: int = 1
-    finished_at: int = 0
-    message_id: str | None = None
+    id:                 int
+    external_id:        str
+
+    title:              str
+    other_title:        str
+
+    episode_count:      int
+    episode_duration:   int
+
+    type:               str
+    year:               int
+    added_at:           int
+    airing_status:      AiringStatus
+
+    status:             ItemStatus
+    highlighted:        bool = False
+    continue_from:      int = 1
+    finished_at:        int = 0
+
 
 
 class SearchList(list[SearchObject]):
@@ -118,11 +105,3 @@ class LockFileKeys(StrEnum):
     DB_LAST_UPDATE = "db_last_updated"
     DB_PAGES = "db_pages"
     WATCHLIST_LAST_REFRESH = "watchlist_last_refresh"
-
-
-class Servers(StrEnum):
-    RAPIDCLOUD = "1"
-    STREAMTAPE = "3"
-    VIDSTREAMING = "4"
-    STREAMSB = "5"
-    MEGAPLAY = "9"

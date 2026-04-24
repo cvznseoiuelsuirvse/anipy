@@ -3,18 +3,25 @@ import aiohttp
 import os
 import re
 import shutil
+import time
 import subprocess
 import tempfile
 import base64
 
 from typing import Awaitable, Callable
 
-from ..core.types import EpisodeInfo, EpisodeSources
+from ..core.types import EpisodeSources
 from ..core.exceptions import BadResponse, PlaylistError, BadHost
 from ..core.util import get_temp_dir
 
 from .progressbar import ProgressBar
+import random
 
+
+def gen_string(len: int) -> str:
+    vals = [random.randint(0, 0xff) for _ in range(len)]
+    return "".join(map(lambda i: i.to_bytes(1, "little").hex(), vals))
+    
 
 class Player:
     def __init__(self, headers: dict) -> None:
@@ -22,7 +29,6 @@ class Player:
         self.headers = headers
 
         self.__main_dir = get_temp_dir()
-        self.__progress: ProgressBar
 
     async def __aenter__(self):
         self.__connector = aiohttp.TCPConnector(limit=10)
@@ -110,20 +116,23 @@ class Player:
 
         return segment_urls
 
-    async def _download(self, url: str, output_file: str, ep_info: EpisodeInfo) -> None:
+    async def _download(self, url: str, output_file: str) -> None:
         segments = await self._extract_segments(url)
 
-        title = f"{ep_info.num} {ep_info.title}"
-        self.__progress = ProgressBar(len(segments), title)
+        self.__progress = ProgressBar(len(segments), os.path.basename(output_file))
 
-        tasks = [self._write_segment(ep_info.id, seg) for seg in segments]
+        t = int(time.time() * 1000000)
+        val = (t & 0xffffff) + (t >> 32)
+        id = hex(val)
+        
+        tasks = [self._write_segment(id, seg) for seg in segments]
         await asyncio.gather(*tasks)
 
         _, playlist_file = tempfile.mkstemp(dir=self.__main_dir)
 
         segments = []
         for file in os.listdir(self.__main_dir):
-            seg = re.match(rf"({ep_info.id}_seg\d+)", file)
+            seg = re.match(rf"({id}_seg\d+)", file)
             if seg:
                 abs_path = os.path.join(self.__main_dir, seg.group(1))
                 segments.append(abs_path)
@@ -155,40 +164,27 @@ class Player:
         args.append(f"--user-agent={user_agent}")
         header_fields = ",".join(f"{k}: {v}" for k, v in self.headers.items())
         args.append(f"--http-header-fields={header_fields}")
-        # args.append("--http-proxy=http://127.0.0.1:8080")
 
         args.append(video_file)
         proc = subprocess.run(args, capture_output=True)
         if proc.returncode != 0:
             print(proc.stdout)
-        # subprocess.run(args)
 
-    def generate_filename(self, ep_info: EpisodeInfo) -> str:
-        title = re.sub(r"\W", "", ep_info.title)
-        return f"{title}_{ep_info.num}"
-
-    async def download_file(self, ep_info: EpisodeInfo, ep_sources: EpisodeSources, output_dir: str) -> None:
-        print(f"{ep_info.num} {ep_info.title}")
-
-        filename_base = self.generate_filename(ep_info)
+    async def download_file(self, ep_sources: EpisodeSources, output_dir: str) -> None:
+        filename_base = gen_string(10)
         filename_base = filename_base.replace("'", "\\'")
 
-        master_url = ep_sources.sources[0]["file"]
+        master_url = ep_sources.source
 
         if not shutil.which("ffmpeg"):
             raise SystemError(f"ffmpeg not found")
 
         video_file = os.path.join(output_dir, f"{filename_base}.mp4")
-        await self._download(master_url, video_file, ep_info)
+        await self._download(master_url, video_file)
 
 
-    async def play_file(self, ep_info: EpisodeInfo, ep_sources: EpisodeSources) -> None:
-        print(f"{ep_info.num} {ep_info.title}")
-
-        filename_base = self.generate_filename(ep_info)
-        filename_base = filename_base.replace("'", "\\'")
-
-        master_file = ep_sources.sources[0]["file"]
+    async def play_file(self, ep_sources: EpisodeSources) -> None:
+        master_file = ep_sources.source
         sub_file = next((track["file"] for track in ep_sources.tracks if "default" in track), None)
 
         self._play(master_file, sub_file)

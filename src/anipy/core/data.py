@@ -1,21 +1,11 @@
 import os
 import json
-import re
 import sqlite3
-import sys
-import time
 
-from typing import Generator, Literal, get_origin, get_args, AsyncGenerator
+from typing import Literal, get_origin, get_args
 
 from .types import DataObject, DataList, LockFileKeys, Serializable
-from .exceptions import BadResponse
 from ..providers import ProviderTypes
-
-from .util import compress_data, decompress_data
-
-from ..integrations.discord import DiscordAPI
-from ..integrations.webhook import Webhook, Body
-
 
 def get_user_config_dir() -> str:
     if os.name == "posix":
@@ -80,7 +70,7 @@ class Config:
                 self.__obj = json.load(f)
                 for k, v in self.__obj.items():
                     if k == "provider":
-                        setattr(self, k, ProviderTypes[v])
+                        setattr(self, k, ProviderTypes(v))
 
                     else:
                         setattr(self, k, v)
@@ -151,20 +141,6 @@ class Config:
 
         return d
 
-    def create(self) -> dict:
-        data = {
-            "banner": [],
-        }
-
-        dir_name = os.path.dirname(self.__path)
-        if not os.path.exists(dir_name):
-            os.mkdir(dir_name)
-
-        with open(self.__path, "w") as f:
-            json.dump(data, f, indent=4)
-
-        return data
-
 
 class Condition:
     def __init__(self, column: str, expression: str, values: list) -> None:
@@ -172,8 +148,7 @@ class Condition:
         self.expession = expression.upper()
         self.values = values
 
-    @property
-    def query(self) -> str:
+    def __str__(self) -> str:
         placeholders = ", ".join(["?"] * len(self.values))
 
         if self.expession == "in":
@@ -182,10 +157,11 @@ class Condition:
         return f"{self.column} {self.expession} {placeholders}"
 
 
-class DB:
+class DBManager:
     def __init__(self, path: str) -> None:
         self.con = sqlite3.connect(path, check_same_thread=False)
         self.con.row_factory = sqlite3.Row
+
 
     def create(self, table: str, fields: dict) -> None:
         columns = ",\n\t".join([f"{k} {v}" if v is not None else k for k, v in fields.items()])
@@ -194,10 +170,10 @@ class DB:
         self.con.execute(query)
         self.con.commit()
 
-    def select(self, table: str, condition: Condition | None = None) -> list[dict]:
-        if condition:
-            params = condition.values
-            query = f"SELECT * FROM {table} WHERE {condition.query}"
+    def select(self, table: str, conditions: list[Condition] | None = None) -> list[dict]:
+        if conditions:
+            params = [v for c in conditions for v in c.values]
+            query = f"SELECT * FROM {table} WHERE {' AND '.join(map(str, conditions))}"
 
         else:
             params = []
@@ -206,7 +182,16 @@ class DB:
         cur = self.con.execute(query, params)
         return list(map(dict, cur.fetchall()))
 
-    def insert(self, table: str, rows: list[dict]) -> None:
+    def insert(self, table: str, row: dict) -> None:
+        placeholders = ", ".join(["?"] * len(row))
+        keys, values = zip(*sorted(row.items()))
+
+        query = f"INSERT INTO {table} ({', '.join(keys)}) VALUES ({placeholders})"
+
+        self.con.execute(query, values)
+        self.con.commit()
+
+    def insert_many(self, table: str, rows: list[dict]) -> None:
         placeholders = ", ".join(["?"] * len(rows[0]))
         keys = ""
         values = []
@@ -223,18 +208,18 @@ class DB:
         self.con.executemany(query, values)
         self.con.commit()
 
-    def update(self, table: str, data: dict, condition: Condition) -> None:
+    def update(self, table: str, data: dict, conditions: list[Condition]) -> None:
         placeholders = ", ".join([f"{k} = ?" for k in data.keys()])
-        query = f"UPDATE {table} SET {placeholders} WHERE {condition.query}"
+        query = f"UPDATE {table} SET {placeholders} WHERE {' AND '.join(map(str, conditions))}"
 
-        params = list(data.values()) + condition.values
+        params = list(data.values()) + [v for c in conditions for v in c.values]
 
         self.con.execute(query, params)
         self.con.commit()
 
-    def delete(self, table: str, condition: Condition) -> None:
-        params = condition.values
-        query = f"DELETE FROM {table} WHERE {condition.query}"
+    def delete(self, table: str, conditions: list[Condition]) -> None:
+        params = [v for c in conditions for v in c.values]
+        query = f"DELETE FROM {table} WHERE {' AND '.join(map(str, conditions))}"
 
         self.con.execute(query, params)
         self.con.commit()
@@ -244,12 +229,12 @@ class DB:
 
 
 class LocalDB:
-    def __init__(self) -> None:
+    def __init__(self, provider: ProviderTypes) -> None:
         db_filename = f"data.db"
         self.__path = os.path.join(get_user_data_dir(), db_filename)
 
-        self.__db = DB(self.__path)
-        self.__table = "data"
+        self.__db = DBManager(self.__path)
+        self.__provider = provider
 
         self.__main_table = "data"
         self.__ids_table =  "ids"
@@ -257,34 +242,60 @@ class LocalDB:
         self._create_main_table()
         self._create_ids_table()
 
-    def pull(self) -> Generator[DataObject, None, None]:
-        for o in self.__db.select(self.__table):
-            yield DataObject(o)
+    def get_all(self) -> list[DataObject]:
+        l = []
+
+        for o in self.__db.select(self.__main_table):
+            do = DataObject(o)
+            do.external_id = self.get_external_id(do.id) or ""
+            l.append(do)
+
+        return l
 
     def erase(self) -> None:
         os.remove(self.__path)
-        self.__init__()
+        self.__init__(self.__provider)
 
-    def add(self, objects: list[DataObject]) -> None:
-        if any(self.__db.select(self.__table, Condition("id", "=", [o.id])) for o in objects):
-            return
+    def add(self, object: DataObject) -> None:
+        data = object.json()
+        self.__db.insert(self.__main_table, data)
+        self.add_id(object)
 
-        self.__db.insert(self.__table, [o.json() for o in objects])
+    def add_id(self, object: DataObject) -> None:
+        self.__db.insert(
+            self.__ids_table, 
+            {
+                "id": object.id, 
+                "provider": self.__provider, 
+                "external_id": object.external_id
+            }
+        )
+
+    def get_external_id(self, internal_id: int) -> str | None:
+        conds = [
+            Condition("id", "=", [internal_id]),
+            Condition("provider", "=", [self.__provider]),
+        ]
+        res = self.__db.select(self.__ids_table, conds)
+        if not res: 
+            return None
+
+        return res[0]['external_id']
 
     def update(self, object: DataObject) -> None:
         d = object.json()
         d.pop("id")
 
-        self.__db.update(self.__table, d, Condition("id", "=", [object.id]))
+        self.__db.update(self.__main_table, d, [Condition("id", "=", [object.id])])
 
     def remove(self, object: DataObject) -> None:
-        self.__db.delete(self.__table, Condition("id", "=", [object.id]))
+        self.__db.delete(self.__main_table, [Condition("id", "=", [object.id])])
 
-    def _create_ids_table(self) -> None:
+    def _create_main_table(self) -> None:
         self.__db.create(
-            self.__ids_table,
+            self.__main_table,
             {
-                "id": "TEXT PRIMARY KEY",
+                "id": "INTEGER",
                 "title": "TEXT NOT NULL",
                 "other_title": "TEXT",
                 "episode_count": "INTEGER",
@@ -297,17 +308,15 @@ class LocalDB:
                 "description": "TEXT",
                 "genres": "TEXT",
                 "episode_duration": "TEXT",
-                "poster": "TEXT NOT NULL UNIQUE",
                 "type": "TEXT NOT NULL",
-                "url": "TEXT NOT NULL UNIQUE",
-                "airing_status": "TEXT",
-                "message_id": "TEXT NOT NULL UNIQUE",
+                "airing_status": "TEXT CHECK(airing_status IN ('finished', 'airing'))",
+                "PRIMARY KEY (id AUTOINCREMENT)": None,
             },
         )
 
-    def _create_main_table(self) -> None:
+    def _create_ids_table(self) -> None:
         self.__db.create(
-            self.__main_table,
+            self.__ids_table,
             {
                 "id": "INTEGER",
                 "provider": "TEXT NOT NULL",
@@ -320,168 +329,37 @@ class LocalDB:
 
 class MalDB: ...
 
-class DiscordDB:
-    def __init__(self) -> None:
-        env_vars = ["ANIPY_DATA_WEBHOOK", "ANIPY_DISCORD_TOKEN"]
-
-        for e in env_vars:
-            if not os.getenv(e):
-                raise SystemError(f"'{e}' environment variable isn't set")
-
-        self.__wh = Webhook(os.environ["ANIPY_DATA_WEBHOOK"])
-        self.__d = DiscordAPI(os.environ["ANIPY_DISCORD_TOKEN"])
-
-    async def _load_webhooks(self) -> None:
-        if not hasattr(self.__wh, "channel_id"):
-            await self.__wh.info()
-
-    async def last_updated(self) -> int:
-        await self._load_webhooks()
-
-        resp = await self.__d.get_channel(self.__wh.channel_id)
-        pattern = r"anipy-\w+-(\d{10})"
-        match = re.search(pattern, resp["name"])
-
-        if not match:
-            return await self.update_last_updated()
-
-        return int(match.group(1))
-
-    async def update_last_updated(self) -> int:
-        await self._load_webhooks()
-
-        ts = int(time.time())
-        await self.__d.modify_channel(self.__wh.channel_id, {"name": f"anipy-data-{ts}"})
-
-        return ts
-
-    async def pull(self) -> AsyncGenerator[DataObject, None]:
-        await self._load_webhooks()
-
-        pages = lock_file_get_content().get(LockFileKeys.DB_PAGES, [])
-        for msg in await self.__d.get_channel_messages_full(self.__wh.channel_id, pages):
-            content_b64 = msg["content"]
-            content_json = decompress_data(content_b64)
-            content_json["message_id"] = msg["id"]
-
-            yield DataObject(content_json)
-
-    async def add(self, object: DataObject) -> str:
-        msg_content = compress_data(object.json())
-        code, resp = await self.__wh.send(Body(content=msg_content))
-        if code != 200:
-            raise BadResponse(f"{code}: {resp}")
-
-        return resp["id"]
-
-    async def update(self, object: DataObject, message_id: str) -> None:
-        msg_content = compress_data(object.json())
-        code, resp = await self.__wh.edit(message_id, Body(content=msg_content))
-        if code != 200:
-            raise BadResponse(f"{code}: {resp}")
-
-    async def remove(self, message_id: str) -> None:
-        code, resp = await self.__wh.delete(message_id)
-        if code != 204:
-            raise BadResponse(f"{code}: {resp}")
-
-
 class Data:
-    def __init__(self) -> None:
-        self.remote = DiscordDB()
-        self.local = LocalDB()
-
-        self.datadict: dict[str, DataObject] = {}
+    def __init__(self, provider: ProviderTypes) -> None:
+        self.local = LocalDB(provider)
+        self.provider = provider
+        self.data: list[DataObject]
 
     @property
     def watchlist(self) -> DataList:
-        return DataList(sorted((o for o in self.datadict.values() if o.status == "watchlist"), key=lambda o: o.added_at))
+        return DataList(sorted((o for o in self.data if o.status == "watchlist"), key=lambda o: o.added_at))
 
     @property
     def completed(self) -> DataList:
-        return DataList(sorted((o for o in self.datadict.values() if o.status == "completed"), key=lambda o: o.finished_at))
+        return DataList(sorted((o for o in self.data if o.status == "completed"), key=lambda o: o.finished_at))
 
-    async def load(self) -> None:
-        print("   local data", end="")
-        sys.stdout.flush()
+    def load(self) -> None:
+        self.data = self.local.get_all()
 
-        self.__lock_file_content = lock_file_get_content()
-        remote_db_last_updated = await self.remote.last_updated()
-        local_db_last_updated = self.__lock_file_content.get(LockFileKeys.DB_LAST_UPDATE, 0)
+    def add(self, object: DataObject) -> None:
+        self.local.add(object)
+        self.data.append(object)
 
-        objects = []
+    def add_id(self, object: DataObject, external_id: str) -> None:
+        object.external_id = external_id
+        self.local.add_id(object)
 
-        if local_db_last_updated == 0:
-            print("\r\033[1m:(\033[0m local data: not found", end="")
-            sys.stdout.flush()
-
-            async for object in self.remote.pull():
-                self.datadict[object.id] = object
-                objects.append(object)
-            print("\r\033[1m=D\033[0m local data: pulled from remote")
-
-            self.local.add(objects)
-            lock_file_update(LockFileKeys.DB_LAST_UPDATE, remote_db_last_updated)
-
-        elif remote_db_last_updated > local_db_last_updated:
-            print("\r\033[1m:(\033[0m local data: outdated", end="")
-            sys.stdout.flush()
-            self.local.erase()
-
-            async for object in self.remote.pull():
-                self.datadict[object.id] = object
-                objects.append(object)
-
-            print("\r\033[1m=D\033[0m local data: pulled from remote")
-
-            self.local.add(objects)
-            lock_file_update(LockFileKeys.DB_LAST_UPDATE, remote_db_last_updated)
-
-        elif remote_db_last_updated == local_db_last_updated:
-            print("\r\033[1m=D\033[0m local data: sync")
-            for object in self.local.pull():
-                self.datadict[object.id] = object
-
-        else:
-            raise ValueError("cho")
-
-    async def add(self, object: DataObject) -> None:
-        message_id = await self.remote.add(object)
-        object.message_id = message_id
-
-        self.local.add([object])
-        self.datadict[object.id] = object
-
-        ts = await self.remote.update_last_updated()
-        lock_file_update(LockFileKeys.DB_LAST_UPDATE, ts)
-
-    async def update(self, object: DataObject) -> None:
-        assert object.message_id
-
-        message_id = object.message_id
-
-        # unset object.message_id, so when object is sent to remote
-        # it's not included in the json blob
-        object.message_id = None
-        await self.remote.update(object, message_id)
-
-        object.message_id = message_id
+    def update(self, object: DataObject) -> None:
         self.local.update(object)
 
-        self.datadict[object.id] = object
-
-        ts = await self.remote.update_last_updated()
-        lock_file_update(LockFileKeys.DB_LAST_UPDATE, ts)
-
-    async def remove(self, object: DataObject) -> None:
-        assert object.message_id
-        await self.remote.remove(object.message_id)
+    def remove(self, object: DataObject) -> None:
         self.local.remove(object)
-
-        self.datadict.pop(object.id)
-
-        ts = await self.remote.update_last_updated()
-        lock_file_update(LockFileKeys.DB_LAST_UPDATE, ts)
+        self.data.pop(object.id)
 
 
 if __name__ == "__main__": ...
