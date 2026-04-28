@@ -186,7 +186,7 @@ class DBManager:
         placeholders = ", ".join(["?"] * len(row))
         keys, values = zip(*sorted(row.items()))
 
-        query = f"INSERT INTO {table} ({', '.join(keys)}) VALUES ({placeholders})"
+        query = f"INSERT OR REPLACE INTO {table} ({', '.join(keys)}) VALUES ({placeholders})"
 
         self.con.execute(query, values)
         self.con.commit()
@@ -242,12 +242,13 @@ class LocalDB:
         self._create_main_table()
         self._create_ids_table()
 
+
     def get_all(self) -> list[DataObject]:
         l = []
 
         for o in self.__db.select(self.__main_table):
             do = DataObject(o)
-            do.external_id = self.get_external_id(do.id) or ""
+            do.external_id = self.get_external_id(do.id, self.__provider) or ""
             l.append(do)
 
         return l
@@ -258,23 +259,29 @@ class LocalDB:
 
     def add(self, object: DataObject) -> None:
         data = object.json()
-        self.__db.insert(self.__main_table, data)
-        self.add_id(object)
+        data.pop("external_id")
 
-    def add_id(self, object: DataObject) -> None:
+        self.__db.insert(self.__main_table, data)
+
+        last = self.__db.select(self.__main_table, [Condition("added_at", "=", [object.added_at])])[0]
+        object.id = last['id']
+
+        self.add_id(object, self.__provider)
+
+    def add_id(self, object: DataObject, source: str) -> None:
         self.__db.insert(
             self.__ids_table, 
             {
                 "id": object.id, 
-                "provider": self.__provider, 
+                "source": source,
                 "external_id": object.external_id
             }
         )
 
-    def get_external_id(self, internal_id: int) -> str | None:
+    def get_external_id(self, internal_id: int, source: str) -> str | None:
         conds = [
             Condition("id", "=", [internal_id]),
-            Condition("provider", "=", [self.__provider]),
+            Condition("source", "=", [source]),
         ]
         res = self.__db.select(self.__ids_table, conds)
         if not res: 
@@ -284,32 +291,38 @@ class LocalDB:
 
     def update(self, object: DataObject) -> None:
         d = object.json()
-        d.pop("id")
+
+        d.pop("external_id")
 
         self.__db.update(self.__main_table, d, [Condition("id", "=", [object.id])])
 
     def remove(self, object: DataObject) -> None:
+        self.__db.delete(self.__ids_table, [Condition("id", "=", [object.id])])
         self.__db.delete(self.__main_table, [Condition("id", "=", [object.id])])
 
     def _create_main_table(self) -> None:
         self.__db.create(
             self.__main_table,
             {
-                "id": "INTEGER",
-                "title": "TEXT NOT NULL",
-                "other_title": "TEXT",
-                "episode_count": "INTEGER",
-                "year": "INTEGER",
-                "added_at": "INTEGER",
-                "finished_at": "INTEGER DEFAULT 0",
-                "highlighted": "INTEGER DEFAULT 0",
-                "continue_from": "INTEGER DEFAULT 1",
-                "status": "TEXT CHECK(status IN ('watchlist', 'completed'))",
-                "description": "TEXT",
-                "genres": "TEXT",
-                "episode_duration": "TEXT",
-                "type": "TEXT NOT NULL",
-                "airing_status": "TEXT CHECK(airing_status IN ('finished', 'airing'))",
+                "id":               "INTEGER",
+
+                "title":            "TEXT NOT NULL",
+                "other_title":      "TEXT",
+
+                "episode_count":    "INTEGER",
+                "episode_duration": "INTEGER",
+
+                "type":             "TEXT NOT NULL",
+                "year":             "INTEGER",
+                "airing_status":    "TEXT CHECK(airing_status IN ('finished', 'airing'))",
+
+                "added_at":         "INTEGER",
+                "finished_at":      "INTEGER DEFAULT 0",
+
+                "highlighted":      "INTEGER DEFAULT 0",
+                "continue_from":    "INTEGER DEFAULT 1",
+                "status":           "TEXT CHECK(status IN ('watchlist', 'completed', 'dropped'))",
+
                 "PRIMARY KEY (id AUTOINCREMENT)": None,
             },
         )
@@ -319,15 +332,13 @@ class LocalDB:
             self.__ids_table,
             {
                 "id": "INTEGER",
-                "provider": "TEXT NOT NULL",
+                "source": "TEXT NOT NULL",
                 "external_id": "TEXT NOT NULL",
                 "PRIMARY KEY (provider, external_id)": None,
                 "FOREIGN KEY (id) REFERENCES data(id)": None,
             },
         )
 
-
-class MalDB: ...
 
 class Data:
     def __init__(self, provider: ProviderTypes) -> None:
@@ -343,6 +354,10 @@ class Data:
     def completed(self) -> DataList:
         return DataList(sorted((o for o in self.data if o.status == "completed"), key=lambda o: o.finished_at))
 
+    @property
+    def dropped(self) -> DataList:
+        return DataList(sorted((o for o in self.data if o.status == "dropped"), key=lambda o: o.added_at))
+
     def load(self) -> None:
         self.data = self.local.get_all()
 
@@ -350,16 +365,20 @@ class Data:
         self.local.add(object)
         self.data.append(object)
 
-    def add_id(self, object: DataObject, external_id: str) -> None:
+    def add_id(self, object: DataObject, external_id: str, source: str) -> None:
         object.external_id = external_id
-        self.local.add_id(object)
+        if not self.get_id(object.id, source):
+            self.local.add_id(object, source)
+
+    def get_id(self, internal_id: int, source: str) -> str | None:
+        return self.local.get_external_id(internal_id, source)
 
     def update(self, object: DataObject) -> None:
         self.local.update(object)
 
     def remove(self, object: DataObject) -> None:
+        self.data.remove(object)
         self.local.remove(object)
-        self.data.pop(object.id)
 
 
 if __name__ == "__main__": ...

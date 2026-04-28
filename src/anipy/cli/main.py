@@ -5,18 +5,20 @@ import webbrowser
 
 from typing import Callable, Iterable, overload
 
-from ..core.types import LockFileKeys, DataList, SearchList, DataObject, SearchObject, EpisodeSources, EpisodeInfo
+from ..core.types import LockFileKeys, DataList, SearchList, DataObject, SearchObject, EpisodeSources
 from ..core.exceptions import BadHost, BadResponse, ProviderRequestFailed
 from ..core.data import Data, Config, lock_file_update, lock_file_get_content
-from ..core.util import resolve_to_mal
+from ..core.util import resolve_to_mal_id, unordinal
+from ..integrations.mal import MAL, MALListStatuses
 from .builder import CLIApp, ErrorTypes
 
 
 from .player import Player
 
-cfg =      Config()
-data =     Data(cfg.provider)
-provider = cfg.provider.cls()
+cfg         = Config()
+data        = Data(cfg.provider)
+provider    = cfg.provider.cls
+mal         = MAL()
 ctx: DataList | SearchList
 
 TERM_WIDTH = lambda: os.get_terminal_size().columns
@@ -75,7 +77,13 @@ async def get_episode(*, id: int, episode: int) -> EpisodeSources | None:
     if episode not in range(1, object.episode_count + 1):
         return cli.raise_err(ErrorTypes.INVALID_ARGS, "episode must be withing available episodes")
 
-    await check_external_id(object)
+    if isinstance(object, DataObject):
+        try:
+            await check_provider_external_id(object)
+
+        except ValueError as ex:
+            return cli.raise_err(ErrorTypes.INVALID_RESULT, str(ex))
+
     anime_info = await provider.get_anime_info(object.external_id)
     episode_sources = await provider.get_episode_sources(anime_info.external_id, episode)
 
@@ -83,6 +91,7 @@ async def get_episode(*, id: int, episode: int) -> EpisodeSources | None:
 
 async def update_watchlist(force: bool) -> None:
     async def uw(obj: DataObject):
+        await check_provider_external_id(obj)
         obj_new = await provider.get_anime_info(obj.external_id)
 
         for k, v in obj_new.json().items():
@@ -97,12 +106,12 @@ async def update_watchlist(force: bool) -> None:
     wl_last_updated = lock_file_get_content().get(LockFileKeys.WATCHLIST_LAST_REFRESH, 0)
 
     if force or int(time.time()) - wl_last_updated >= 86400:
-        tasks = [uw(obj) for obj in data.watchlist if obj.airing_status == "currently"]
+        tasks = [uw(obj) for obj in data.watchlist if obj.airing_status == "airing"]
         try:
             await asyncio.gather(*tasks)
 
-        except ProviderRequestFailed:
-            return cli.raise_err(ErrorTypes.INVALID_RESULT, "failed to update watchlist")
+        except ProviderRequestFailed as ex:
+            return cli.raise_err(ErrorTypes.INVALID_RESULT, f"failed to update watchlist: {ex}")
 
         finally:
             lock_file_update(LockFileKeys.WATCHLIST_LAST_REFRESH, int(time.time()))
@@ -128,17 +137,45 @@ def show_banner() -> None:
 
         print()
 
-async def check_external_id(obj: SearchObject | DataObject) -> None:
-    if isinstance(obj, SearchObject) or obj.external_id: return
+async def check_provider_external_id(obj: DataObject) -> None:
+    if obj.external_id: return
 
     resp = await provider.search(obj.title)
 
     for a in resp:
         if a.title == obj.title or a.other_title == obj.other_title:
-            data.add_id(obj, a.external_id)
+            data.add_id(obj, a.external_id, cfg.provider)
             return
 
-    raise ValueError("failed to get external_id")
+    raise ValueError("failed to get provider external_id")
+
+async def check_mal_external_id(obj: DataObject) -> str:
+    if mal_id := data.get_id(obj.id, "mal"): return mal_id
+
+    try:
+        res = await mal.search(obj.other_title)
+
+    except BadResponse:
+        pass
+
+    else:
+        for r in res:
+            titles = [r.title + r.alternative_titles['en']] + r.alternative_titles['synonyms']
+
+            for t in titles:
+                t = unordinal(t)
+
+                if t.lower() in [obj.title.lower(), obj.other_title.lower()]:
+                    data.add_id(obj, r.id, "mal")
+                    return r.id
+
+    # fallback to bs4 method
+    id = await resolve_to_mal_id(obj.title, obj.other_title)
+    if id:
+        data.add_id(obj, id, "mal")
+        return id
+
+    raise ValueError(f'failed to get MAL external_id')
 
 
 cli = CLIApp()
@@ -171,28 +208,45 @@ async def mal_search(id: int):
 
 
 @cli.on(validate={"id": lambda id: id in range(0, len(ctx))})
-async def mal(id: int):
+async def mal_page(id: int):
     """find exact anime page on MAL"""
     if id not in range(0, len(ctx)):
         return cli.raise_err(ErrorTypes.INVALID_ARGS, "index must be within context")
 
     anime = ctx[id]
-    url = await resolve_to_mal(anime.title, anime.other_title)
-    if url is None:
+    if isinstance(anime, DataObject):
+        await check_mal_external_id(anime)
+        mal_id = data.get_id(anime.id, "mal")
+
+    else:
+        mal_id = await resolve_to_mal_id(anime.title, anime.other_title)
+
+    if mal_id is None:
         return cli.raise_err(ErrorTypes.INVALID_RESULT, f"Failed to find MAL page for {anime.title}")
 
+    url = f"https://myanimelist.net/anime/{mal_id}"
     webbrowser.open(url)
 
-
-@cli.on(["wl"])
-def watchlist():
-    """show watchlist"""
-    global ctx
-    ctx = data.watchlist
-    cli.prompt = cfg.prompt.format(ctx.name)
-
-    if ctx:
-        print(format_ctx_list(ctx))
+# @cli.on()
+# async def mal_sync():
+#     """sync local watchlist and completed list with MAL"""
+#
+#     mal_list = await mal.list_get()
+#
+#     mal_watchlist = filter(lambda l: l.status in (MALListStatuses.WATCHING, MALListStatuses.PLAN_TO_WATCH), mal_list)
+#     mal_comp =      filter(lambda l: l.status == MALListStatuses.COMPLETED, mal_list)
+#
+#     return
+#
+# @cli.on(["wl"])
+# def watchlist():
+#     """show watchlist"""
+#     global ctx
+#     ctx = data.watchlist
+#     cli.prompt = cfg.prompt.format(ctx.name)
+#
+#     if ctx:
+#         print(format_ctx_list(ctx))
 
 
 @cli.on(["wl-add"], {"id": lambda id: id in range(0, len(ctx))})
@@ -202,37 +256,94 @@ async def watchlist_add(id: int):
         return cli.raise_err(ErrorTypes.INVALID_CONTEXT, "context must be Search type")
 
     object_info = await provider.get_anime_info(ctx[id].external_id)
+
     object_info_json = object_info.json()
 
-    object_info_json.pop("episodes")
-    object_info_json["added_at"] = int(time.time())
-    object_info_json["genres"] = ",".join(object_info.genres)
-    object_info_json["status"] = "watchlist"
+    object_info_json.pop("description")
+    object_info_json.pop("genres")
 
-    data.add(DataObject(object_info_json))
+    object_info_json["status"] = "watchlist"
+    object_info_json["added_at"] = int(time.time())
+
+    do = DataObject(object_info_json)
+
+    data.add(do)
+
+    try:
+        if object_info.mal_id:
+            data.add_id(do, object_info.mal_id, "mal")
+            mal_id = object_info.mal_id
+
+        else:
+            mal_id =  await check_mal_external_id(do)
+
+        await mal.list_add(mal_id, 0, MALListStatuses.PLAN_TO_WATCH)
+
+    except ValueError as ex:
+        cli.raise_err(ErrorTypes.INVALID_RESULT, str(ex), do.title)
+        data.remove(do)
 
 
 @cli.on(["wl-rm"], {"id": lambda id: id in range(0, len(ctx))})
-def watchlist_remove(id: int):
+async def watchlist_remove(id: int):
     """remove anime from watchlist"""
     if not isinstance(ctx, DataList):
         return cli.raise_err(ErrorTypes.INVALID_CONTEXT, "context must be Data type")
 
+    anime = ctx[id]
+    try:
+        mal_id = await check_mal_external_id(anime)
+
+    except ValueError as ex:
+        cli.raise_err(ErrorTypes.INVALID_RESULT, str(ex), anime.title)
+        return 
+
     data.remove(ctx[id])
+    await mal.list_remove(mal_id)
 
+@cli.on(["wl-drop"], {"id": lambda id: id in range(0, len(ctx))})
+async def watchlist_drop(id: int):
+    """drop anime"""
+    if not isinstance(ctx, DataList):
+        return cli.raise_err(ErrorTypes.INVALID_CONTEXT, "context must be Data type")
 
-@cli.on(["comp"], {"part": lambda part: part in ["head", "tail", "all"]})
-def completed(part: str | None = None, n: int | None = None):
-    """show completed list. part: head/tail/all. n: number of rows to show. if not arguments specified it will show last 10 rows"""
+    anime = ctx[id]
+    try:
+        mal_id = await check_mal_external_id(anime)
+
+    except ValueError as ex:
+        cli.raise_err(ErrorTypes.INVALID_RESULT, str(ex), anime.title)
+        return 
+
+    anime.status = "dropped"
+    anime.continue_from = 1
+    anime.highlighted = False
+
+    data.update(ctx[id])
+    await mal.list_add(mal_id, anime.continue_from - 1, MALListStatuses.DROPPED)
+
+@cli.on(["l"], {
+    "type": lambda type: type in ("wl", "comp", "drop"),
+    "part": lambda part: part in ("head", "tail", "all"),
+})
+def anime_list(type: str, part: str | None = None, n: int | None = None):
+    """show anime list. part: head/tail/all. n: number of rows to show. if not arguments specified it will show last 10 rows"""
     global ctx
-    ctx = data.completed
+
+    if type == "wl":
+        ctx = data.watchlist
+    elif type == "comp":
+        ctx = data.completed
+    else:
+        ctx = data.dropped
+
     cli.prompt = cfg.prompt.format(ctx.name)
 
     if ctx:
         ctx_len = len(ctx)
         n = n or 10
 
-        if part == "all":
+        if (type == "wl" and part is None) or part == "all":
             range_to_show = range(ctx_len)
 
         elif part == "head" and n:
@@ -287,6 +398,8 @@ async def download(id: int, episode: int):
 @cli.on(["p", "play"], {"id": lambda id: id in range(0, len(ctx))})
 async def play(id: int, episode: int):
     """play specified episode. this command won't increment continue_from, dehighlight, and move to completed (if last episode was played)"""
+
+    object = ctx[id]
     episode_sources = await get_episode(id=id, episode=episode)
     if not episode_sources:
         cli.raise_err(ErrorTypes.REQUEST_ERROR, "failed to get episode")
@@ -294,6 +407,7 @@ async def play(id: int, episode: int):
 
     try:
         async with Player(provider.extractor_headers) as player:
+            print(f"{object.title}. Episode {episode}")
             await player.play_file(episode_sources)
 
     except (BadResponse, BadHost, SystemError) as ex:
@@ -309,12 +423,20 @@ async def play_next(id: int):
     object = ctx[id]
     episode = object.continue_from
 
+    try:
+        mal_id = await check_mal_external_id(object)
+
+    except ValueError as ex:
+        cli.raise_err(ErrorTypes.INVALID_RESULT, str(ex), object.title)
+        return 
+
     episode_sources = await get_episode(id=id, episode=episode)
     if not episode_sources:
         return
 
     try:
         async with Player(provider.extractor_headers) as player:
+            print(f"{object.title}. Episode {episode}")
             await player.play_file(episode_sources)
 
     except (BadResponse, BadHost) as ex:
@@ -328,12 +450,17 @@ async def play_next(id: int):
             if episode < object.episode_count:
                 object.continue_from = episode + 1
 
+                await mal.list_add(mal_id, object.continue_from - 1, MALListStatuses.WATCHING)
+
             else:
                 object.finished_at = int(time.time())
                 object.status = "completed"
                 object.continue_from = 1
 
+                await mal.list_add(mal_id, object.episode_count, MALListStatuses.COMPLETED)
+
             data.update(object)
+
 
 
 @cli.on(["i"], {"id": lambda id: id in range(0, len(ctx))})
@@ -352,7 +479,13 @@ async def info(id: int, keys: list[str] | None = None):
 
         return new_str.strip()
 
-    await check_external_id(object)
+    if isinstance(object, DataObject):
+        try:
+            await check_provider_external_id(object)
+
+        except ValueError as ex:
+            return cli.raise_err(ErrorTypes.INVALID_RESULT, str(ex))
+
     object = await provider.get_anime_info(object.external_id)
 
     object_json = object.json()
@@ -439,6 +572,7 @@ async def main_():
     global ctx
 
     data.load()
+    await mal.get_token()
 
     ctx = data.watchlist
     cli.prompt = cfg.prompt.format(ctx.name)

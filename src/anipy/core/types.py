@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 type Serializable = str | int | list | dict
 type AiringStatus = Literal["finished", "airing"]
-type ItemStatus =   Literal["completed", "watchlist"]
+type ItemStatus =   Literal["completed", "watchlist", "dropped"]
 
 
 class BaseObject:
@@ -41,6 +41,7 @@ class EpisodeInfo(BaseObject):
 @dataclass
 class AnimeInfo(BaseObject):
     external_id:        str
+    mal_id:             str | None
 
     title:              str
     other_title:        str
@@ -69,6 +70,7 @@ class SearchObject(BaseObject):
 class DataObject(BaseObject):
     id:                 int
     external_id:        str
+    status:             ItemStatus
 
     title:              str
     other_title:        str
@@ -78,13 +80,13 @@ class DataObject(BaseObject):
 
     type:               str
     year:               int
-    added_at:           int
     airing_status:      AiringStatus
 
-    status:             ItemStatus
+    added_at:           int
+    finished_at:        int = 0
+
     highlighted:        bool = False
     continue_from:      int = 1
-    finished_at:        int = 0
 
 
 

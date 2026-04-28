@@ -1,14 +1,13 @@
 import aiohttp
 import json
-import html
+import re
 from typing import Callable, Awaitable
 from enum import EnumDict
-
-from anipy.providers.allmanga.extractor import AllAnimeExctractor
 
 from ...core.exceptions import ProviderRequestFailed
 from ...core.util import cache
 from ...core.types import SearchObject, AnimeInfo, EpisodeSources, AiringStatus
+from .allanime import AllAnime
 
 
 class Exts(EnumDict):
@@ -23,22 +22,32 @@ HEADERS = {
     "Referer": "https://allmanga.to/",
 }
 
-async def make_request[T](params: dict, func: Callable[[aiohttp.ClientResponse], Awaitable[T]]) -> tuple[int, T]:
+async def make_request[T](params: dict, func: Callable[[aiohttp.ClientResponse], Awaitable[T]]) -> T:
     async with aiohttp.ClientSession() as client:
         async with client.get(BASE_URL, headers=HEADERS, params=params) as resp:
-            return resp.status, await func(resp)
+            if resp.status != 200:
+                raise ProviderRequestFailed(resp.url)
+
+            try:
+                return await func(resp)
+
+            except Exception:
+                raise ProviderRequestFailed(resp.url)
+
+
+def clean_html(s: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<.*?>|\n", "", s))
 
 class AllManga:
-    @property
-    def extractor_headers(self) -> dict: 
-        return {
+    extractor_headers: dict = {
             "user-agent": "Mozilla/5.0 (X11; Linux x86_64; rv:139.0) Gecko/20100101 Firefox/139.0",
             "referer": "https://allanime.day/",
         }
 
 
+    @staticmethod
     @cache
-    async def search(self, title: str) -> list[SearchObject]:
+    async def search(title: str) -> list[SearchObject]:
         variables = json.dumps({
             "search": {"query": title},
             "limit": 25,
@@ -48,9 +57,7 @@ class AllManga:
         })
         exts = json.dumps(Exts.SEARCH)
 
-        status, resp = await make_request({"variables": variables, "extensions": exts}, lambda r: r.json())
-        if status != 200:
-            raise ProviderRequestFailed
+        resp = await make_request({"variables": variables, "extensions": exts}, lambda r: r.json())
 
         l = []
         data = resp['data']['shows']['edges']
@@ -67,36 +74,36 @@ class AllManga:
 
         return l
 
+    @staticmethod
     @cache
-    async def get_anime_info(self, id: str) -> AnimeInfo:
+    async def get_anime_info(id: str) -> AnimeInfo:
         variables = json.dumps({
             "_id": id
         })
         exts = json.dumps(Exts.INFO)
 
-        status, resp = await make_request({"variables": variables, "extensions": exts}, lambda r: r.json())
-        if status != 200:
-            raise ProviderRequestFailed
+        resp = await make_request({"variables": variables, "extensions": exts}, lambda r: r.json())
 
         d = resp['data']['show']
         airing_status: AiringStatus = 'airing' if d['status'] == "Releasing" else 'finished'
 
         return AnimeInfo(
             external_id=id,
+            mal_id=None,
             title=d["englishName"],
             other_title=d["name"],
             episode_count=d['availableEpisodes']['sub'],
             episode_duration=d['episodeDuration'],
             type=d['type'],
-            description=html.unescape(d['description']),
+            description=clean_html(d['description']),
             year=d['season']['year'],
             genres=d['genres'],
             airing_status=airing_status,
         )
 
 
-    @cache
-    async def get_episode_sources(self, anime_id: str, ep_num: int) -> EpisodeSources:
+    @staticmethod
+    async def get_episode_sources(anime_id: str, ep_num: int) -> EpisodeSources:
         variables = json.dumps({
             "showId": anime_id,
             "translationType": "sub",
@@ -105,10 +112,6 @@ class AllManga:
 
         exts = json.dumps(Exts.EPISODE)
 
-        status, resp = await make_request({"variables": variables, "extensions": exts}, lambda r: r.json())
-        if status != 200:
-            raise ProviderRequestFailed
+        resp = await make_request({"variables": variables, "extensions": exts}, lambda r: r.json())
 
-
-        e = AllAnimeExctractor()
-        return e.exctract(resp)
+        return AllAnime.exctract(resp)

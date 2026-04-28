@@ -28,13 +28,14 @@ def decode_url(s: str) -> str:
     chars = [hex_to_char[b] for b in bytes.fromhex(s)]
     return ''.join(chars)
 
-class AllAnimeExctractor:
+class AllAnime:
     headers = {
         "user-agent": "Mozilla/5.0 (X11; Linux x86_64; rv:139.0) Gecko/20100101 Firefox/139.0",
         "referer": "https://allanime.day/",
     }
 
-    def exctract(self, data: dict) -> EpisodeSources:
+    @staticmethod
+    def exctract(data: dict) -> EpisodeSources:
         tobeparsed = data['data']['tobeparsed']
         # tobeparsed = data
 

@@ -1,1 +1,1 @@
-from .provider import  HiAnime
+from .hianime import HiAnime

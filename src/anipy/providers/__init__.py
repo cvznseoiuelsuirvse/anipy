@@ -2,21 +2,26 @@ from typing import Protocol
 from enum import StrEnum
 
 from ..core.types import SearchObject, AnimeInfo, EpisodeSources
+
 from .hianime import HiAnime
 from .allmanga import AllManga
+from .animekai import AnimeKai
 
 
 class Provider(Protocol):
-    @property
-    def extractor_headers(self) -> dict: ...
+    extractor_headers: dict
 
-    async def search(self, title: str)           -> list[SearchObject]: ...
-    async def get_anime_info(self, id: str)      -> AnimeInfo: ...
-    async def get_episode_sources(self, anime_id: str, ep_num: int) -> EpisodeSources: ...
+    @staticmethod
+    async def search(title: str)                              -> list[SearchObject]: ...
+    @staticmethod
+    async def get_anime_info(id: str)                         -> AnimeInfo: ...
+    @staticmethod
+    async def get_episode_sources(anime_id: str, ep_num: int) -> EpisodeSources: ...
 
 class ProviderTypes(StrEnum):
     HIANIME =  "hianime"
     ALLMANGA = "allmanga"
+    ANIMEKAI = "animekai"
 
     @property
     def cls(self) -> type[Provider]:
@@ -25,5 +30,8 @@ class ProviderTypes(StrEnum):
 
         if self.value == self.ALLMANGA:
             return AllManga
+
+        if self.value == self.ANIMEKAI:
+            return AnimeKai
 
         raise ValueError(f"unknown provider: {self.value}")

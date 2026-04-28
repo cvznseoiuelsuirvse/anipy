@@ -1,1 +1,1 @@
-from .provider import AllManga
+from .allmanga import AllManga

@@ -1,13 +1,13 @@
 import json
+import datetime
 import re
 import aiohttp
-import datetime
 
 from enum import StrEnum
 from html import unescape
 from typing import overload, Literal, Awaitable, Callable, TypeVar
 
-from .extractor import Servers, Megacloud
+from .megacloud import Servers, Megacloud
 from ...core.util import cache
 from ...core.exceptions import ProviderRequestFailed
 from ...core.types import SearchObject, AnimeInfo, EpisodeSources, AiringStatus
@@ -86,6 +86,8 @@ async def make_request[T](route: str, params: dict, func: Callable[[aiohttp.Clie
             return await func(resp)
 
 def convert_ep_duration(s: str) -> int:
+    s = s.lower()
+
     if "?" in s:
         return 0
 
@@ -97,65 +99,61 @@ def convert_ep_duration(s: str) -> int:
     return dt.minute * 60000
 
 
+def card_scraper(card: str) -> SearchObject:
+    card = clean(card)
+
+    dynamic_name = _re(Patterns.DYNAMIC_NAME, card)
+    sub_count = _re(Patterns.EPISODE_COUNT, card, default=None)
+
+    href = dynamic_name.group("href")
+    external_id = _re(Patterns.ID, href).group(1)
+    title = dynamic_name.group("title")
+    other_title = dynamic_name.group("jtitle")
+
+    episode_count = int(sub_count.group(1)) if sub_count is not None else 0
+
+    items = _re(Patterns.ITEM2, card, all=True)
+
+    type = items[0]
+    episode_duration = items[1]
+
+    return SearchObject(
+        external_id=external_id,
+        title=title,
+        other_title=other_title,
+        episode_count=episode_count,
+        episode_duration=convert_ep_duration(episode_duration),
+        type=type,
+    )
+
+@cache
+async def get_episode_ids(anime_id: str) -> list[str]:
+    num_id = anime_id.split("-")[-1]
+
+    resp = await make_request(f"ajax/v2/episode/list/{num_id}", {}, lambda i: i.text())
+    html_page = clean(json.loads(resp)["html"])
+
+    episodes = _re(Patterns.EPISODE, html_page, all=True)
+
+    return [ep[1] for ep in episodes]
+
 
 class HiAnime:
-    @property
-    def extractor_headers(self) -> dict:
-        return Megacloud.headers
+    extractor_headers: dict = Megacloud.headers
 
-    def _card_scraper(self, card: str) -> SearchObject:
-        ret = {}
-        card = clean(card)
-
-        dynamic_name = _re(Patterns.DYNAMIC_NAME, card)
-        sub_count = _re(Patterns.EPISODE_COUNT, card, default=None)
-
-        href = dynamic_name.group("href")
-        external_id = _re(Patterns.ID, href).group(1)
-        title = dynamic_name.group("title")
-        other_title = dynamic_name.group("jtitle")
-
-        episode_count = int(sub_count.group(1)) if sub_count is not None else 0
-        url = BASE_URL + ret["id"]
-
-        items = _re(Patterns.ITEM2, card, all=True)
-
-        type = items[0]
-        episode_duration = items[1]
-
-        return SearchObject(
-            external_id=external_id,
-            title=title,
-            other_title=other_title,
-            episode_count=episode_count,
-            episode_duration=convert_ep_duration(episode_duration),
-            type=type,
-        )
-
+    @staticmethod
     @cache
-    async def _get_episode_ids(self, anime_id: str) -> list[str]:
-        num_id = anime_id.split("-")[-1]
-
-        resp = await make_request(f"ajax/v2/episode/list/{num_id}", {}, lambda i: i.text())
-        html_page = clean(json.loads(resp)["html"])
-
-        episodes = _re(Patterns.EPISODE, html_page, all=True)
-
-        return [ep[1] for ep in episodes]
-        
-
-
-    @cache
-    async def search(self, title: str) -> list[SearchObject]:
+    async def search(title: str) -> list[SearchObject]:
         params = {"keyword": title, "page": 1}
         html_page = await make_request("search", params, lambda r: r.text())
         html_page = re.sub(r"\s", " ", html_page)
 
         all_cards = _re(Patterns.CARD, html_page, all=True, default=[])
-        return [self._card_scraper(card) for card in all_cards]
+        return [card_scraper(card) for card in all_cards]
 
+    @staticmethod
     @cache
-    async def get_anime_info(self, id: str) -> AnimeInfo:
+    async def get_anime_info(id: str) -> AnimeInfo:
         html_page = await make_request(id, {}, lambda r: r.text())
         html_page = clean(html_page)
 
@@ -203,6 +201,7 @@ class HiAnime:
 
         return AnimeInfo(
             external_id=external_id,
+            mal_id=None,
             title=title,
             other_title=other_title,
             description=description,
@@ -214,9 +213,10 @@ class HiAnime:
             episode_duration=convert_ep_duration(episode_duration),
         )
 
+    @staticmethod
     @cache
-    async def get_episode_sources(self, anime_id: str, ep_num: int) -> EpisodeSources:
-        episode_ids = await self._get_episode_ids(anime_id)
+    async def get_episode_sources(anime_id: str, ep_num: int) -> EpisodeSources:
+        episode_ids = await get_episode_ids(anime_id)
         ep_id = episode_ids[ep_num-1]
 
         resp = await make_request("ajax/v2/episode/servers", {"episodeId": ep_id}, lambda i: i.text())

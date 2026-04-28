@@ -50,9 +50,9 @@ class CLIApp:
             readline.set_completer_delims(" \t\n;")
             readline.set_completer(self._complete)
 
-    def raise_err(self, err_type: ErrorTypes, err_message: str | None = None) -> None:
-        if err_message:
-            print(f"{err_type.name.lower()}: {err_message}")
+    def raise_err(self, err_type: ErrorTypes, *args) -> None:
+        if args:
+            print(f"{err_type.name.lower()}: ", *args)
         else:
             print(f"{err_type.name.lower()}")
 
