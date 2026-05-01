@@ -1,7 +1,8 @@
 import zlib
 import aiohttp
+import difflib
 import re
-import bs4
+import parsel
 import base64
 import os
 import json
@@ -9,62 +10,37 @@ import inspect
 import functools
 
 
-def get_user_id() -> int:
-    return os.getuid() if os.name == "posix" else os.getlogin()
+def get_user_id() -> str:
+    return str(os.getuid()) if os.name == "posix" else os.getlogin()
 
 
 type Serializable = str | int | list | dict
 
-async def resolve_to_mal_id(title: str, other_title: str) -> str | None:
-    async def req(url: str) -> str:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                return await resp.text()
-
-    search_url = f"https://myanimelist.net/anime.php?q={other_title}&cat=anime"
-    search_resp = await req(search_url)
-    soup = bs4.BeautifulSoup(search_resp, "html.parser")
-
-    results = soup.select_one(".js-categories-seasonal.js-block-list.list")
-    if not results:
-        soup.decompose()
-        return None
-
-    for tr in results.find_all("tr"):
-        a = tr.select_one(".hoverinfo_trigger.fw-b.fl-l")
-        if a:
-            title = a.text.strip().lower()
-            title = unordinal(title)
-
-            if title in (title.lower(), other_title.lower()):
-                soup.decompose()
-                return a.attrs["data-l-content-id"]
-
-    soup.decompose()
-    return None
-
-async def resolve_to_mal(title: str, other_title: str) -> str | None:
-    async def req(url: str) -> str:
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url) as resp:
-                return await resp.text()
-
+async def resolve_to_mal(title: str, other_title: str, *, return_id: bool = False) -> str | None:
     search_url = f"https://myanimelist.net/anime.php?q={title}&cat=anime"
-    search_resp = await req(search_url)
-    soup = bs4.BeautifulSoup(search_resp, "html.parser")
 
-    results = soup.select_one(".js-categories-seasonal.js-block-list.list")
-    if not results:
-        soup.decompose()
-        return None
+    async with aiohttp.ClientSession() as session:
+        async with session.get(search_url) as resp:
+            search_resp = await resp.text()
 
-    for tr in results.find_all("tr"):
-        a = tr.select_one(".hoverinfo_trigger.fw-b.fl-l")
-        if a and a.text.strip() in (title, other_title):
-            soup.decompose()
-            return a.attrs["href"]
+    selector = parsel.Selector(search_resp)
 
-    soup.decompose()
+    for i, tr in enumerate(selector.css("tr")):
+        if i == 0:
+            continue
+
+        a = tr.css("div.title > a")
+        if not a: continue
+
+        anime_title = a.xpath("normalize-space()").get("")
+        anime_title = unordinal(anime_title)
+
+        anime_href = a.attrib["href"]
+        anime_id = a.attrib["data-l-content-id"]
+
+        if anime_title.lower() in (title.lower(), other_title.lower()):
+            return anime_id if return_id else anime_href
+
     return None
 
 
@@ -89,7 +65,7 @@ def decompress_data(data: str) -> dict:
     data_string = zlib.decompress(data_compressed).decode()
     return json.loads(data_string)
 
-def __make_key(args, kwargs):
+def _make_key(args, kwargs):
     return (args, tuple(sorted(kwargs.items())))
 
 def cache(func):
@@ -98,7 +74,7 @@ def cache(func):
     if inspect.iscoroutinefunction(func):
         @functools.wraps(func)
         async def async_wrapper(*args, **kwargs):
-            key = __make_key(args, kwargs)
+            key = _make_key(args, kwargs)
             if key in __cache:
                 return __cache[key]
 
@@ -113,7 +89,7 @@ def cache(func):
 
         @functools.wraps(func)
         def sync_wrapper(*args, **kwargs):
-            key = __make_key(args, kwargs)
+            key = _make_key(args, kwargs)
 
             if key in __cache:
                 return __cache[key]
@@ -138,3 +114,6 @@ def ordinal(s: str) -> str:
 def unordinal(s: str) -> str:
     return re.sub(r"(\d+)(?:th|st|nd|rd) ([Ss])eason", lambda m: f"{m.group(2)}eason {m.group(1)}", s)
 
+def is_similar(a: str, b: str, threshold: float = 0.8) -> bool:
+    sm = difflib.SequenceMatcher(None, a.lower(), b.lower()).ratio()
+    return sm >= threshold

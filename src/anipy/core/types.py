@@ -1,6 +1,8 @@
 from enum import StrEnum
 from typing import Any, Literal
 from dataclasses import dataclass
+from typing import TypedDict
+import inspect
 
 type Serializable = str | int | list | dict
 type AiringStatus = Literal["finished", "airing"]
@@ -11,8 +13,11 @@ class BaseObject:
     def __init__(self, obj: dict = {}) -> None:
         self.__obj = obj
 
+        an = inspect.get_annotations(type(self))
+
         for k, v in self.__obj.items():
-            setattr(self, k, v)
+            if k in an:
+                setattr(self, k, v)
 
     def json(self) -> dict[str, Any]:
         d = {}
@@ -24,22 +29,38 @@ class BaseObject:
 
         return d
 
+class JsonSerializable:
+    def json(self) -> dict:
+        d = {}
+
+        for k in dir(self):
+            if not k.startswith("_"):
+                v = getattr(self, k)
+                if v is not None and not callable(v):
+                    if isinstance(v, JsonSerializable):
+                        d[k] = v.json()
+                    else:
+                        d[k] = v
+
+        return d
+
+
 
 @dataclass
-class EpisodeSources(BaseObject):
+class EpisodeSources(JsonSerializable):
     source:     str
     tracks:     list[dict]
     intro:      tuple[int, int]
     outro:      tuple[int, int]
 
-class EpisodeInfo(BaseObject):
+class EpisodeInfo(JsonSerializable):
     id:                 str
     title:              str
     other_title:        str
     num:                int
 
 @dataclass
-class AnimeInfo(BaseObject):
+class AnimeInfo(JsonSerializable):
     external_id:        str
     mal_id:             str | None
 
@@ -59,17 +80,18 @@ class AnimeInfo(BaseObject):
 
 
 @dataclass
-class SearchObject(BaseObject):
+class SearchObject(JsonSerializable):
     external_id:        str
+
     title:              str
     other_title:        str
+
     episode_count:      int
     episode_duration:   int
     type:               str
 
-class DataObject(BaseObject):
-    id:                 int
-    external_id:        str
+@dataclass
+class DataObject(JsonSerializable):
     status:             ItemStatus
 
     title:              str
@@ -87,7 +109,27 @@ class DataObject(BaseObject):
 
     highlighted:        bool = False
     continue_from:      int = 1
+    id:                 int = 0
 
+class DataObjectDict(TypedDict):
+    id:                 int
+    status:             ItemStatus
+
+    title:              str
+    other_title:        str
+
+    episode_count:      int
+    episode_duration:   int
+
+    type:               str
+    year:               int
+    airing_status:      AiringStatus
+
+    added_at:           int
+    finished_at:        int
+
+    highlighted:        bool
+    continue_from:      int
 
 
 class SearchList(list[SearchObject]):

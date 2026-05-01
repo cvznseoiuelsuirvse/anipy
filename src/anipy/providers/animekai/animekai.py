@@ -5,7 +5,7 @@ import aiohttp
 from typing import Callable, Awaitable
 
 
-from ...core.exceptions import SelectorNotFound, ProviderRequestFailed
+from ...core.exceptions import SelectorNotFound, InvalidResponse, InvalidStatusCode
 from ...core.util import cache
 from ...core.types import SearchObject, AnimeInfo, EpisodeSources, AiringStatus
 
@@ -21,13 +21,13 @@ async def make_request[T](route: str, *, params: dict | None = None, f: Callable
     async with aiohttp.ClientSession() as client:
         async with client.get(url, headers=HEADERS, params=params) as resp:
             if resp.status != 200:
-                raise ProviderRequestFailed(resp.url)
+                raise InvalidStatusCode(resp.status, resp.url)
 
             try:
                 return await f(resp)
 
             except Exception:
-                raise ProviderRequestFailed(resp.url)
+                raise InvalidResponse(resp.url)
 
 def convert_ep_duration(s: str) -> int:
     s = s.lower()
@@ -92,7 +92,7 @@ class AnimeKai:
 
     @staticmethod
     @cache
-    async def get_anime_info(id: str) -> AnimeInfo:
+    async def get_anime(id: str) -> AnimeInfo:
         resp = await make_request(f"/watch/{id}", f=lambda r: r.text())
         selector = parsel.Selector(resp).css("div#watch-page")
 
@@ -172,8 +172,8 @@ class AnimeKai:
 
 
     @staticmethod
-    async def get_episode_sources(anime_id: str, ep_num: int) -> EpisodeSources:
-        return await Megaup.exctract(f"{BASE_URL}/watch/{anime_id}", ep_num, "sub")
+    async def get_episodes(anime_id: str, ep_num: int) -> EpisodeSources:
+        return await Megaup.extract(f"{BASE_URL}/watch/{anime_id}", ep_num, "sub")
 
 
 if __name__ == "__main__":
@@ -181,10 +181,10 @@ if __name__ == "__main__":
         # resp = await AnimeKai.search("rent a girl")
         # for r in resp:
         #     print(r)
-        info = await AnimeKai.get_anime_info("kanojo-okarishimasu-ywy9")
+        info = await AnimeKai.get_anime("kanojo-okarishimasu-ywy9")
         print(info)
 
-        sources = await AnimeKai.get_episode_sources("kanojo-okarishimasu-ywy9", 1)
+        sources = await AnimeKai.get_episodes("kanojo-okarishimasu-ywy9", 1)
         print(sources)
 
     asyncio.run(main())

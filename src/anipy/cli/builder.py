@@ -1,13 +1,12 @@
 import inspect
 import sys
 import shlex
-import asyncio
 import os
 
 import readline
 
 from types import UnionType
-from typing import Awaitable, Callable, Any, get_args
+from typing import Callable, Any, get_args
 from enum import IntEnum
 
 
@@ -34,97 +33,126 @@ type _ValidateFunc = Callable[[Any], bool]
 type _CommandHandler = Callable[..., None]
 
 
+class CommandRegistry:
+    def __init__(self) -> None:
+        self._commands: dict[str, tuple[_CommandHandler, range, dict[str, _ValidateFunc]]] = {}
+
+    def register(self, func: _CommandHandler, aliases: list[str], validate: dict[str, _ValidateFunc]) -> str:
+        command = func.__name__.replace("_", "-")
+        argc_max = func.__code__.co_argcount + 1
+        argc_min = 0
+        for _, param in inspect.signature(func).parameters.items():
+            if param.default is not None:
+                argc_min += 1
+        self._commands[command] = (func, range(argc_min, argc_max), validate)
+        setattr(func, "__aliases__", aliases)
+        for alias in aliases:
+            self._commands[alias] = self._commands[command]
+        return command
+
+    def lookup(self, name: str) -> tuple[_CommandHandler, range, dict[str, _ValidateFunc]] | None:
+        return self._commands.get(name)
+
+    def names(self) -> list[str]:
+        return list(self._commands.keys())
+
+    def items(self):
+        return self._commands.items()
+
+
+_COERCERS: dict[str, Callable[[str], Any]] = {
+    "str": lambda x: x,
+    "int": int,
+    "list": lambda x: x.split(","),
+}
+
+
+def coerce_arg(raw: str, type_name: str) -> Any:
+    if type_name not in _COERCERS:
+        raise TypeError(type_name)
+
+    try:
+        return _COERCERS[type_name](raw)
+
+    except (ValueError, TypeError):
+        raise ValueError(type_name)
+
+
+class HelpFormatter:
+    def format(self, command: str, callback: _CommandHandler) -> str:
+        args_line = []
+        for arg, annotation in inspect.get_annotations(callback).items():
+            if arg != "return":
+                if isinstance(annotation, UnionType):
+                    inner = get_args(annotation)
+                    type_name = next(a.__name__ for a in inner if a is not type(None))
+                    args_line.append(f"[{arg} {type_name}]")
+                else:
+                    args_line.append(f"<{arg} {annotation.__name__}>")
+
+        aliases = getattr(callback, "__aliases__", [])
+        alias_prefix = f" {', '.join(aliases)} -> {command}\n" if aliases else f" {command}\n"
+        body = f"    {' '.join(args_line)} - {callback.__doc__}" if args_line else f"    {callback.__doc__}"
+        return alias_prefix + body
+
+    def print_one(self, name: str, registry: CommandRegistry) -> None:
+        seen = []
+        for command, (callback, _, _) in registry.items():
+            if command == name and callback not in seen:
+                seen.append(callback)
+                print(self.format(command, callback) + "\n")
+
+    def print_all(self, registry: CommandRegistry) -> None:
+        seen = []
+        for command, (callback, _, _) in registry.items():
+            if callback not in seen:
+                seen.append(callback)
+                print(self.format(command, callback) + "\n")
+
+
 class CLIApp:
     def __init__(self) -> None:
-        self.commands: dict[str, tuple[_CommandHandler, range, dict[str, _ValidateFunc]]] = {}
+        self._registry = CommandRegistry()
+        self._formatter = HelpFormatter()
         self.prompt = "> "
 
         if os.name == "posix":
             if sys.platform == "darwin":
                 readline.parse_and_bind("bind -v")
                 readline.parse_and_bind("bind ^I rl_complete")
-
             else:
                 readline.parse_and_bind("tab: complete")
-
             readline.set_completer_delims(" \t\n;")
             readline.set_completer(self._complete)
 
     def raise_err(self, err_type: ErrorTypes, *args) -> None:
         if args:
-            print(f"{err_type.name.lower()}: ", *args)
+            print(f"\033[31mERROR: {err_type.name}:", *args, "\033[0m")
         else:
-            print(f"{err_type.name.lower()}")
+            print(f"\033[31mERROR: {err_type.name}\033[0m")
 
     def completer(self, text, state):
         return None
 
     def _complete(self, text, state):
         tokens = readline.get_line_buffer().split()
-
         if len(tokens) < 2:
-            options = [c for c in self.commands if c.startswith(text)]
-
+            options = [c for c in self._registry.names() if c.startswith(text)]
             if state < len(options):
                 return options[state]
-
         else:
             return self.completer(text, state)
 
     def _show_help(self, c: str | None = None) -> None:
-        shown_commands = []
-
-        for command, (callback, _, _) in self.commands.items():
-            if c == command or c is None:
-                if callback not in shown_commands:
-                    shown_commands.append(callback)
-                    args_line = []
-
-                    for arg, annotation in inspect.get_annotations(callback).items():
-                        if arg != "return":
-                            if isinstance(annotation, UnionType):
-                                args = get_args(annotation)
-                                type = args[0].__name__
-                                args_line.append(f"[{arg} {type}]")
-                            else:
-                                args_line.append(f"<{arg} {annotation.__name__}>")
-
-                    aliases = getattr(callback, "__aliases__", [])
-
-                    if aliases and args_line:
-                        line = f" {', '.join(aliases)} -> {command}\n    {' '.join(args_line)} - {callback.__doc__}"
-
-                    elif aliases:
-                        line = f" {', '.join(aliases)} -> {command}\n    {callback.__doc__}"
-
-                    elif args_line:
-                        line = f" {command}\n    {' '.join(args_line)} - {callback.__doc__}"
-
-                    else:
-                        line = f" {command}\n    {callback.__doc__}"
-
-                    print(line + "\n")
+        if c is None:
+            self._formatter.print_all(self._registry)
+        else:
+            self._formatter.print_one(c, self._registry)
 
     def on(self, aliases: list[str] = [], validate: dict[str, Callable] = {}):
-        def wrapper(func) -> None:
-            command = func.__name__.replace("_", "-")
-
-            argc_max = func.__code__.co_argcount + 1
-            argc_min = 0
-
-            sig = inspect.signature(func)
-            for _, param in sig.parameters.items():
-                if param.default is not None:
-                    argc_min += 1
-
-            self.commands[command] = (func, range(argc_min, argc_max), validate)
-
-            setattr(func, "__aliases__", aliases)
-            for a in aliases:
-                self.commands[a] = self.commands[command]
-
+        def wrapper(func):
+            self._registry.register(func, aliases, validate)
             return func
-
         return wrapper
 
     async def run(self) -> None:
@@ -133,86 +161,70 @@ class CLIApp:
 
             for usr_input in full.split(";"):
                 usr_input = usr_input.strip()
+                if not usr_input:
+                    continue
 
-                if usr_input:
-                    try:
-                        tokens = shlex.split(usr_input)
-                    except Exception:
-                        usr_input += '"'
-                        tokens = shlex.split(usr_input)
+                try:
+                    tokens = shlex.split(usr_input)
+                except Exception:
+                    tokens = shlex.split(usr_input + '"')
 
-                    command = tokens[0]
-                    args = tokens[1:]
+                command, *args = tokens
 
-                    if command in self.commands:
-                        callback, argc_range, validate = self.commands[command]
-                        callback_annotations = inspect.get_annotations(callback)
+                if command in ("q", "quit"):
+                    return
 
-                        if len(args) not in argc_range:
-                            self._show_help(command)
-                            if argc_range.start - argc_range.stop > 1:
-                                self.raise_err(ErrorTypes.INSUFFICIENT_ARGS, f"expected from {argc_range.start} to {argc_range.stop} arguments, got {len(args)}")
-                            else:
-                                self.raise_err(ErrorTypes.INSUFFICIENT_ARGS, f"expected {argc_range.start} argument{'s' if argc_range.start > 1 else ''}, got {len(args)}")
-                            continue
+                if command in ("h", "help"):
+                    self._show_help()
+                    continue
 
-                        skip = False
-                        for i, arg in enumerate(args):
-                            annotation = list(callback_annotations.items())[i]
-                            annotation_arg = annotation[0]
-                            annotation_args = get_args(annotation[1])
+                entry = self._registry.lookup(command)
+                if entry is None:
+                    self.raise_err(ErrorTypes.CMD_NOTFOUND, "try help")
+                    continue
 
-                            if annotation_args:
-                                annotation_type = next((i.__name__ for i in annotation_args if i is not type(None)))
-                            else:
-                                annotation_type = annotation[1].__name__
+                callback, argc_range, validate = entry
+                annotations = inspect.get_annotations(callback)
 
-                            validate_func = validate.get(annotation_arg, None)
-
-                            match annotation_type:
-                                case "str":
-                                    pass
-
-                                case "int":
-                                    try:
-                                        arg = int(arg)
-                                    except ValueError:
-                                        self._show_help(command)
-                                        self.raise_err(ErrorTypes.INVALID_ARGS, f"expected type 'int' for argument '{annotation_arg}'")
-                                        skip = True
-                                        break
-
-                                case "list":
-                                    arg = arg.split(",")
-
-                                case _:
-                                    self._show_help(command)
-                                    self.raise_err(ErrorTypes.INVALID_ARGS, f"invalid type '{annotation_type.__name__}' for argument '{annotation_arg}'")
-                                    skip = True
-                                    break
-
-                            if validate_func and not validate_func(arg):
-                                self._show_help(command)
-                                self.raise_err(ErrorTypes.ARG_VALIDATION_FAILED, annotation_arg)
-                                skip = True
-                                break
-
-                            args[i] = arg
-
-                        if skip:
-                            continue
-
-                        if asyncio.iscoroutinefunction(callback):
-                            await callback(*args)
-
-                        else:
-                            callback(*args)
-
-                    elif command in ("q", "quit"):
-                        return
-
-                    elif command in ("h", "help"):
-                        self._show_help()
-
+                if len(args) not in argc_range:
+                    self._show_help(command)
+                    span = argc_range.stop - argc_range.start
+                    if span > 1:
+                        self.raise_err(ErrorTypes.INSUFFICIENT_ARGS, f"expected from {argc_range.start} to {argc_range.stop} arguments, got {len(args)}")
                     else:
-                        self.raise_err(ErrorTypes.CMD_NOTFOUND, "try help")
+                        self.raise_err(ErrorTypes.INSUFFICIENT_ARGS, f"expected {argc_range.start} argument{'s' if argc_range.start > 1 else ''}, got {len(args)}")
+                    continue
+
+                skip = False
+                for i, (ann_name, ann_type) in enumerate(list(annotations.items())[:len(args)]):
+                    inner = get_args(ann_type)
+                    type_name = next((a.__name__ for a in inner if a is not type(None)), None) if inner else ann_type.__name__
+
+                    try:
+                        args[i] = coerce_arg(args[i], type_name)
+
+                    except TypeError:
+                        self._show_help(command)
+                        self.raise_err(ErrorTypes.INVALID_ARGS, f"invalid type '{type_name}' for argument '{ann_name}'")
+                        skip = True
+                        break
+                    except ValueError:
+                        self._show_help(command)
+                        self.raise_err(ErrorTypes.INVALID_ARGS, f"expected type '{type_name}' for argument '{ann_name}'")
+                        skip = True
+                        break
+
+                    validate_func = validate.get(ann_name)
+                    if validate_func and not validate_func(args[i]):
+                        self._show_help(command)
+                        self.raise_err(ErrorTypes.ARG_VALIDATION_FAILED, ann_name)
+                        skip = True
+                        break
+
+                if skip:
+                    continue
+
+                if inspect.iscoroutinefunction(callback):
+                    await callback(*args)
+                else:
+                    callback(*args)

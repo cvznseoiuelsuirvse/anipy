@@ -11,7 +11,7 @@ import base64
 from typing import Awaitable, Callable
 
 from ..core.types import EpisodeSources
-from ..core.exceptions import BadResponse, PlaylistError, BadHost
+from ..core.exceptions import InvalidResponse, InvalidStatusCode
 from ..core.util import get_temp_dir
 
 from .progressbar import ProgressBar
@@ -21,40 +21,82 @@ import random
 def gen_string(len: int) -> str:
     vals = [random.randint(0, 0xff) for _ in range(len)]
     return "".join(map(lambda i: i.to_bytes(1, "little").hex(), vals))
-    
 
-class Player:
-    def __init__(self, headers: dict) -> None:
-        self.player_bin = "mpv"
-        self.headers = headers
 
-        self.__main_dir = get_temp_dir()
+async def make_request[T](
+        session: aiohttp.ClientSession,
+        method: str, 
+        url: str, 
+        headers: dict, 
+        handler: Callable[[aiohttp.ClientResponse], Awaitable[T]],
+    ) -> T:
+    async with session.request(method.upper(), url, headers=headers) as resp:
+        if resp.status not in [200, 520]:
+            raise InvalidStatusCode(resp.status, resp.url)
 
-    async def __aenter__(self):
-        self.__connector = aiohttp.TCPConnector(limit=10)
-        self.__session = aiohttp.ClientSession(connector=self.__connector)
-
-        return self
-
-    async def __aexit__(self, *_):
-        await self.__connector.close()
-        await self.__session.close()
-
-        # self.clean()
-
-    async def _make_request[T](self, method: str, url: str, func: Callable[[aiohttp.ClientResponse], Awaitable[T]]) -> T:
-        # print(url)
         try:
-            async with self.__session.request(method.upper(), url, headers=self.headers) as resp:
-                if resp.status not in [200, 520]:
-                    raise BadResponse(f"Response code: {resp.status} ({url})")
+            data = await handler(resp)
 
-                return await func(resp)
+        except Exception as e:
+            raise InvalidResponse(resp.url, e)
+            
+        return data
 
-        except aiohttp.ClientConnectorCertificateError:
-            raise BadHost(url)
+class HLSClient:
+    def __init__(self, session: aiohttp.ClientSession, headers: dict) -> None:
+        self.headers = headers
+        self.session = session
 
-    async def _write_segment(self, id: str, url: str) -> None:
+    async def get_master_file(self, master_url: str) -> tuple[str, re.Match]:
+        index_pattern = r"#EXT-X-STREAM-INF:PROGRAM-ID=\d+,BANDWIDTH=\d+,RESOLUTION=(\d+)x(\d+),FRAME-RATE=[\d\.]+,CODECS=\"[\w\.,]+\"\n(.+?)\n"
+        master_response = await make_request(self.session, "get", master_url, self.headers, lambda i: i.text())
+
+        vids = re.finditer(index_pattern, master_response)
+        if not vids:
+            raise InvalidResponse("no index files found")
+
+        sort_by_res = lambda vid: int(vid.group(1)) * int(vid.group(2))
+        vid = sorted(vids, key=sort_by_res)[-1]
+        return master_response, vid
+
+    async def extract_segments(self, master_url: str) -> list[str]:
+        segments_pattern = r"EXTINF:[\d\.]+,\n([^\n]+)"
+        segment_urls = []
+
+        base_url = master_url.rsplit("/", 1)[0]
+
+        _, vid = await self.get_master_file(master_url)
+        filename = vid.group(3)
+
+        if filename.startswith("https://"):
+            index_url = filename
+        else:
+            index_url = f"{base_url}/{filename}"
+
+        index_file_content = await make_request(self.session, "get", index_url, self.headers, lambda e: e.text())
+
+        for m in re.finditer(segments_pattern, index_file_content):
+            segment = m.group(1)
+
+            if segment.startswith("https://"):
+                segment_urls.append(segment)
+            else:
+                segment_urls.append(f"{base_url}/{segment}")
+
+        return segment_urls
+
+class VideoDownloader:
+    def __init__(self, session: aiohttp.ClientSession, headers: dict) -> None:
+        self.headers = headers
+        self.session = session
+
+    def cleanup(self) -> None:
+        dir = get_temp_dir()
+        for i in os.listdir(dir):
+            if re.match(r"seg\d+|index_|master_", i):
+                os.remove(os.path.join(dir, i))
+
+    async def _write_segment(self, id: str, url: str, out_dir: str, pb: ProgressBar) -> None:
         pattern = r"seg-(\d+)"
         url_filename = url.rsplit('/', maxsplit=1)[1]
 
@@ -67,74 +109,39 @@ class Player:
             assert m
 
         filename = f"{id}_seg{m.group(1)}"
-        path = os.path.join(self.__main_dir, filename)
+        path = os.path.join(out_dir, filename)
 
         async def _write(resp: aiohttp.ClientResponse):
             with open(path, "wb") as f:
                 async for chunk in resp.content.iter_any():
                     f.write(chunk)
 
-        await self._make_request("get", url, _write)
+        await make_request(self.session, "get", url, self.headers, _write)
 
-        self.__progress.update()
+        pb.update()
 
-    async def _get_master_file(self, master_url: str) -> tuple[str, re.Match]:
-        index_pattern = r"#EXT-X-STREAM-INF:PROGRAM-ID=\d+,BANDWIDTH=\d+,RESOLUTION=(\d+)x(\d+),FRAME-RATE=[\d\.]+,CODECS=\"[\w\.,]+\"\n(.+?)\n"
-        master_response = await self._make_request("get", master_url, lambda i: i.text())
+    async def download(self, url: str, output_file: str) -> None:
+        hls = HLSClient(self.session, self.headers)
+        segments = await hls.extract_segments(url)
 
-        vids = re.finditer(index_pattern, master_response)
-        if not vids:
-            raise PlaylistError("no index files found")
-
-        sort_by_res = lambda vid: int(vid.group(1)) * int(vid.group(2))
-        vid = sorted(vids, key=sort_by_res)[-1]
-        return master_response, vid
-
-    async def _extract_segments(self, master_url: str) -> list[str]:
-        segments_pattern = r"EXTINF:[\d\.]+,\n([^\n]+)"
-        segment_urls = []
-
-        base_url = master_url.rsplit("/", 1)[0]
-
-        _, vid = await self._get_master_file(master_url)
-        filename = vid.group(3)
-
-        if filename.startswith("https://"):
-            index_url = filename
-        else:
-            index_url = f"{base_url}/{filename}"
-
-        index_file_content = await self._make_request("get", index_url, lambda e: e.text())
-
-        for m in re.finditer(segments_pattern, index_file_content):
-            segment = m.group(1)
-
-            if segment.startswith("https://"):
-                segment_urls.append(segment)
-            else:
-                segment_urls.append(f"{base_url}/{segment}")
-
-        return segment_urls
-
-    async def _download(self, url: str, output_file: str) -> None:
-        segments = await self._extract_segments(url)
-
-        self.__progress = ProgressBar(len(segments), os.path.basename(output_file))
+        progress = ProgressBar(len(segments), os.path.basename(output_file))
 
         t = int(time.time() * 1000000)
         val = (t & 0xffffff) + (t >> 32)
         id = hex(val)
+
+        out_dir = get_temp_dir()
         
-        tasks = [self._write_segment(id, seg) for seg in segments]
+        tasks = [self._write_segment(id, seg, out_dir, progress) for seg in segments]
         await asyncio.gather(*tasks)
 
-        _, playlist_file = tempfile.mkstemp(dir=self.__main_dir)
+        _, playlist_file = tempfile.mkstemp(dir=out_dir)
 
         segments = []
-        for file in os.listdir(self.__main_dir):
+        for file in os.listdir(out_dir):
             seg = re.match(rf"({id}_seg\d+)", file)
             if seg:
-                abs_path = os.path.join(self.__main_dir, seg.group(1))
+                abs_path = os.path.join(out_dir, seg.group(1))
                 segments.append(abs_path)
 
         segments = sorted(segments, key=lambda i: int(i.split("seg")[1]))
@@ -150,6 +157,23 @@ class Player:
         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
 
         os.remove(playlist_file)
+        self.cleanup()
+
+
+class Player:
+    def __init__(self, headers: dict) -> None:
+        self.player_bin = "mpv"
+        self.headers = headers
+
+    async def __aenter__(self):
+        self.__connector = aiohttp.TCPConnector(limit=10)
+        self.__session = aiohttp.ClientSession(connector=self.__connector)
+
+        return self
+
+    async def __aexit__(self, *_):
+        await self.__connector.close()
+        await self.__session.close()
 
     def _play(self, video_file: str, sub_file: str | None) -> None:
         if not shutil.which(self.player_bin):
@@ -168,7 +192,7 @@ class Player:
         args.append(video_file)
         proc = subprocess.run(args, capture_output=True)
         if proc.returncode != 0:
-            print(proc.stdout)
+            raise SystemError(proc.stdout.decode())
 
     async def download_file(self, ep_sources: EpisodeSources, output_dir: str) -> None:
         filename_base = gen_string(10)
@@ -180,7 +204,8 @@ class Player:
             raise SystemError(f"ffmpeg not found")
 
         video_file = os.path.join(output_dir, f"{filename_base}.mp4")
-        await self._download(master_url, video_file)
+        downloader = VideoDownloader(self.__session, self.headers)
+        await downloader.download(master_url, video_file)
 
 
     async def play_file(self, ep_sources: EpisodeSources) -> None:
@@ -188,8 +213,3 @@ class Player:
         sub_file = next((track["file"] for track in ep_sources.tracks if "default" in track), None)
 
         self._play(master_file, sub_file)
-
-    def clean(self) -> None:
-        for i in os.listdir(self.__main_dir):
-            if re.match(r"seg\d+|index_|master_", i):
-                os.remove(os.path.join(self.__main_dir, i))

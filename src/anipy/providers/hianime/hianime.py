@@ -9,7 +9,7 @@ from typing import overload, Literal, Awaitable, Callable, TypeVar
 
 from .megacloud import Servers, Megacloud
 from ...core.util import cache
-from ...core.exceptions import ProviderRequestFailed
+from ...core.exceptions import InvalidResponse
 from ...core.types import SearchObject, AnimeInfo, EpisodeSources, AiringStatus
 
 BASE_URL = "https://aniwatchtv.to/"
@@ -71,7 +71,7 @@ def _re(pattern: "Patterns", string: str, *, all: bool = False, default: T = DEF
 
     if not v and default is DEFAULT:
         msg = f"{pattern.name} not found"
-        raise ProviderRequestFailed(msg)
+        raise InvalidResponse(msg)
 
     elif not v:
         return default
@@ -153,7 +153,7 @@ class HiAnime:
 
     @staticmethod
     @cache
-    async def get_anime_info(id: str) -> AnimeInfo:
+    async def get_anime(id: str) -> AnimeInfo:
         html_page = await make_request(id, {}, lambda r: r.text())
         html_page = clean(html_page)
 
@@ -215,7 +215,7 @@ class HiAnime:
 
     @staticmethod
     @cache
-    async def get_episode_sources(anime_id: str, ep_num: int) -> EpisodeSources:
+    async def get_episodes(anime_id: str, ep_num: int) -> EpisodeSources:
         episode_ids = await get_episode_ids(anime_id)
         ep_id = episode_ids[ep_num-1]
 

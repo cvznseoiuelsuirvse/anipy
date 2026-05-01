@@ -7,13 +7,13 @@ import asyncio
 import secrets
 import re
 import urllib.parse
-from typing import Awaitable, Callable, TypedDict
 from functools import wraps
 from dataclasses import dataclass
 from enum import StrEnum
 
 from ..core.data import get_user_data_dir
-from ..core.exceptions import BadResponse
+from ..core.exceptions import InvalidResponse, InvalidStatusCode
+from ..core.types import AnimeInfo, SearchObject
 
 BASE_API_URL = "https://api.myanimelist.net/v2"
 
@@ -26,37 +26,6 @@ def construct_url(url: str, params: dict[str, str]) -> str:
 
     return url
 
-async def make_request[T](
-    method: str, 
-    url: str, 
-    *, 
-    headers: dict | None = None, 
-    params: dict | None = None, 
-    data: dict | None = None, 
-    func: Callable[[aiohttp.ClientResponse], Awaitable[T]]
-) -> tuple[int, T]:
-    async with aiohttp.ClientSession() as client:
-        async with client.request(method, url, headers=headers, params=params, data=data) as resp:
-            return resp.status, await func(resp)
-
-class MALAnimeAlternativeTitles(TypedDict):
-    synonyms: list[str]
-    en: str
-    jp: str
-
-
-@dataclass
-class MALSearchObject:
-    id:                 str
-    title:              str
-    alternative_titles: MALAnimeAlternativeTitles
-
-@dataclass
-class MALAnimeInfo:
-    id:             str
-    title:          str
-    other_title:    str
-
 
 class MALListStatuses(StrEnum):
     WATCHING      = "watching"
@@ -66,9 +35,70 @@ class MALListStatuses(StrEnum):
     PLAN_TO_WATCH = "plan_to_watch"
 
 @dataclass 
-class MALListItem(MALAnimeInfo):
-    status: MALListStatuses
+class MALAnimeInfo(AnimeInfo):
+    list_status: MALListStatuses | None
 
+def extract_base(node: dict) -> dict:
+    description = node.get('synopsis', "None")
+    description = re.sub(r"\s+", " ", description)
+
+    start_season = node.get("start_season")
+    if start_season:
+        year = start_season['year']
+    else:
+        year = 0
+
+    genres = [g["name"] for g in node["genres"]]
+    status = node["status"]
+
+    if status in ("currently_airing", "not_yet_aired"):
+        status = "airing"
+
+    else:
+        status = "finished"
+
+    media_type = node['media_type']
+    if media_type == "tv":
+        media_type = "TV"
+    else:
+        media_type = media_type.title()
+
+    episode_count = node['num_episodes']
+    episode_duration = node['average_episode_duration'] * 1000
+
+    return {
+        "mal_id":           node['id'],
+        "external_id":      node['id'],
+        "title":            node['alternative_titles'].get('en', node['title']), 
+        "other_title":      node['title'], 
+        "description":      description,
+        "year":             year,
+        "genres":           genres,
+        "airing_status":    status,
+        "type":             media_type,
+        "episode_count":    episode_count,
+        "episode_duration": episode_duration,
+    }
+
+
+def list_dict_to_cls(d: dict) -> MALAnimeInfo:
+    node = d['node']
+    base = extract_base(node)
+
+    st = MALListStatuses(d['list_status']['status'])
+
+    return MALAnimeInfo(**base, list_status=st)
+
+def info_dict_to_cls(d: dict) -> MALAnimeInfo:
+    base = extract_base(d)
+
+    if d.get('my_list_status'):
+        st = MALListStatuses(d['my_list_status']['status'])
+
+    else:
+        st = None
+
+    return MALAnimeInfo(**base, list_status=st)
 
 class MAL:
     def __init__(self) -> None:
@@ -80,6 +110,24 @@ class MAL:
 
         self.__token_file_path = os.path.join(get_user_data_dir(), "mal.json")
         self.__token: str | None = None
+
+    async def make_request(
+        self,
+        method: str, 
+        url: str, 
+        *, 
+        params: dict | None = None, 
+        data: dict | None = None, 
+    ) -> dict:
+        headers = {"Authorization": f"Bearer {self.__token}"}
+
+        async with aiohttp.ClientSession() as client:
+            async with client.request(method, url, headers=headers, params=params, data=data) as resp:
+                j = await resp.json()
+                if resp.status != 200:
+                    raise InvalidStatusCode(resp.status, j)
+
+                return j
 
     @staticmethod
     def _check_token(func):
@@ -133,81 +181,79 @@ class MAL:
             "code_verifier": challenge,
         }
 
-        status, resp = await make_request("POST", token_url, data=token_data, func=lambda r: r.json())
-        if status != 200:
-            raise BadResponse(status)
+        resp = await self.make_request("POST", token_url, data=token_data)
 
         if 'error' in resp:
-            raise BadResponse(resp['error'], resp['hint'])
+            raise InvalidResponse(resp['error'], resp['hint'])
 
         self._save_token(resp)
         self.__token = resp['access_token']
 
         assert resp['token_type'] == "Bearer"
 
+
     @_check_token
-    async def search(self, title: str) -> list[MALSearchObject]:
+    async def search(self, title: str) -> list[SearchObject]:
         url = BASE_API_URL + "/anime"
         params = {
             "q": urllib.parse.quote(title),
             "limit": 100,
-            "fields": "alternative_titles"
+            "fields": "alternative_titles,num_episodes,average_episode_duration,media_type"
         }
-        headers = {"Authorization": f"Bearer {self.__token}"}
 
-        status, resp = await make_request("GET", url, headers=headers, params=params, func=lambda r: r.json())
-        if status != 200:
-            raise BadResponse(status, resp)
-
+        resp = await self.make_request("GET", url, params=params)
         data = resp['data']
 
         l = []
         for d in data:
             node = d['node']
-            l.append(MALSearchObject(
-                node['id'], 
-                node['title'], 
-                node['alternative_titles'])
+            l.append(
+                SearchObject(
+                    node['id'], 
+                    node['alternative_titles']['en'],
+                    node['title'], 
+                    node['num_episodes'],
+                    node['average_episode_duration'] * 1000,
+                    "TV" if node['media_type'] == "tv" else node['media_type'].title(),
+                )
             )
 
         return l
 
     @_check_token
-    async def get_anime(self, str: int) -> MALAnimeInfo: ...
+    async def get_anime(self, id: str) -> AnimeInfo:
+        url = f"{BASE_API_URL}/anime/{id}"
+        params = {
+            "fields": "alternative_titles,synopsis,genres,average_episode_duration,media_type,status,my_list_status,num_episodes,start_season"
+        }
+
+        resp = await self.make_request("GET", url, params=params)
+        return info_dict_to_cls(resp)
+
 
     @_check_token
     async def list_add(self, id: str, ep_count: int, list_status: MALListStatuses) -> None:
-        url = f'https://api.myanimelist.net/v2/anime/{id}/my_list_status'
+        url = f'{BASE_API_URL}/anime/{id}/my_list_status'
         data = {
             "status": list_status,
             "num_watched_episodes": ep_count,
         }
-        headers = {"Authorization": f"Bearer {self.__token}"}
-
         if list_status == MALListStatuses.COMPLETED:
             data['score'] = 10
 
         elif list_status == MALListStatuses.DROPPED:
             data['score'] = 1
 
-        status, resp = await make_request("PUT", url, headers=headers, data=data, func=lambda r: r.json())
-        if status != 200:
-            raise BadResponse(status, resp)
-
+        await self.make_request("PUT", url, data=data)
 
     @_check_token
     async def list_remove(self, id: str) -> None:
-        url = f'https://api.myanimelist.net/v2/anime/{id}/my_list_status'
-        headers = {"Authorization": f"Bearer {self.__token}"}
-
-        status, resp = await make_request("DELETE", url, headers=headers, func=lambda r: r.json())
-        if status != 200:
-            raise BadResponse(status, resp)
-
+        url = f'{BASE_API_URL}/anime/{id}/my_list_status'
+        await self.make_request("DELETE", url)
 
     @_check_token
-    async def list_get(self, list_status: MALListStatuses | None = None, offset: int = 0) -> list[MALListItem]:
-        url = 'https://api.myanimelist.net/v2/users/@me/animelist'
+    async def list_get(self, list_status: MALListStatuses | None = None, offset: int = 0) -> list[MALAnimeInfo]:
+        url = f'{BASE_API_URL}/users/@me/animelist'
         params: dict = {
             "limit": 1000,
             "offset": offset,
@@ -215,25 +261,13 @@ class MAL:
 
         if list_status is not None:
             params['status'] = list_status
-            
-        headers = {"Authorization": f"Bearer {self.__token}"}
 
-        status, resp = await make_request("GET", url, headers=headers, params=params, func=lambda r: r.json())
-        if status != 200:
-            raise BadResponse(status, resp)
-
+        resp = await self.make_request("GET", url, params=params)
         data = resp['data']
 
         l = []
         for d in data:
-            node = d['node']
-            st = MALListStatuses(d['list_status']['status'])
-            l.append(MALListItem(
-                node['id'], 
-                node['title'], 
-                node['alternative_titles'].get('en', ""), 
-                st)
-             )
+            l.append(list_dict_to_cls(d))
 
         return l
 

@@ -4,7 +4,7 @@ import re
 from typing import Callable, Awaitable
 from enum import EnumDict
 
-from ...core.exceptions import ProviderRequestFailed
+from ...core.exceptions import InvalidResponse, InvalidStatusCode
 from ...core.util import cache
 from ...core.types import SearchObject, AnimeInfo, EpisodeSources, AiringStatus
 from .allanime import AllAnime
@@ -26,13 +26,13 @@ async def make_request[T](params: dict, func: Callable[[aiohttp.ClientResponse],
     async with aiohttp.ClientSession() as client:
         async with client.get(BASE_URL, headers=HEADERS, params=params) as resp:
             if resp.status != 200:
-                raise ProviderRequestFailed(resp.url)
+                raise InvalidStatusCode(resp.status, resp.url)
 
             try:
                 return await func(resp)
 
             except Exception:
-                raise ProviderRequestFailed(resp.url)
+                raise InvalidResponse(resp.status, resp.url)
 
 
 def clean_html(s: str) -> str:
@@ -76,7 +76,7 @@ class AllManga:
 
     @staticmethod
     @cache
-    async def get_anime_info(id: str) -> AnimeInfo:
+    async def get_anime(id: str) -> AnimeInfo:
         variables = json.dumps({
             "_id": id
         })
@@ -103,7 +103,7 @@ class AllManga:
 
 
     @staticmethod
-    async def get_episode_sources(anime_id: str, ep_num: int) -> EpisodeSources:
+    async def get_episodes(anime_id: str, ep_num: int) -> EpisodeSources:
         variables = json.dumps({
             "showId": anime_id,
             "translationType": "sub",

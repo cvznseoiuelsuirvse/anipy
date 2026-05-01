@@ -7,8 +7,8 @@ import base64
 from typing import Callable, Literal, Awaitable
 
 from ...core.types import EpisodeSources
+from ...core.exceptions import InvalidStatusCode, InvalidResponse
 
-class InvalidResponse(Exception): pass
 class SyncDataNotFound(Exception): pass
 class EpisodeTokensNotFound(Exception): pass
 class EpisodeNotFound(Exception): pass
@@ -17,6 +17,9 @@ from .t import IFRAME_ROUNDS, SOURCES_ROUNDS, TransformConfig, PARAMS_ROUNDS
 
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:147.0) Gecko/20100101 Firefox/147.0"
 
+to_text = lambda r: r.text()
+to_json = lambda r: r.json()
+
 async def request[T](
         url: str, 
         *,
@@ -24,15 +27,19 @@ async def request[T](
         params: dict | None = None, 
         cookies: dict | None = None,
         f: Callable[[aiohttp.ClientResponse], Awaitable[T]]
-) -> tuple[int, T | None]:
+) -> T:
     async with aiohttp.ClientSession(cookies=cookies) as session:
         async with session.get(url, headers=headers, params=params) as resp:
+            if resp.status != 200:
+                raise InvalidStatusCode(resp.status, resp.url)
+
             try:
                 data = await f(resp)
-            except Exception:
-                data = None
 
-            return resp.status, data
+            except Exception as e:
+                raise InvalidResponse(resp.url, e)
+
+            return data
 
 
 def to_base(n, base):
@@ -93,7 +100,7 @@ def transform(
     return bytes(out)
 
 def rc4(key: bytes, data: bytes) -> bytes:
-    s = [i for i in range(256)]
+    s = list(range(256))
     j = 0
 
     for i in range(256):
@@ -140,13 +147,9 @@ def encrypt_param(s: str) -> str:
 
 
 class Megaup:
-
     @staticmethod
     async def get_iframe(url: str, ep: int, ver: str) -> str:
-        status, resp = await request(url, f=lambda r: r.text())
-        if status != 200 or resp is None:
-            raise InvalidResponse(url)
-
+        resp = await request(url, f=to_text)
         m = re.search(r'({"page".+?})', resp)
         if not m:
             raise SyncDataNotFound
@@ -159,10 +162,7 @@ class Megaup:
             "_": encrypt_param(sync_data['anime_id'])
         }
 
-        status, resp = await request(list_episodes_url, params=list_episodes_params, f=lambda r: r.json())
-        if status != 200 or resp is None:
-            raise InvalidResponse
-
+        resp = await request(list_episodes_url, params=list_episodes_params, f=to_json)
         result = resp['result']
 
         tokens = re.findall(r'token="([\w-]+)"', result)
@@ -179,10 +179,7 @@ class Megaup:
             "_": encrypt_param(token),
         }
 
-        status, resp = await request(list_links_url, params=list_links_params, f=lambda r: r.json())
-        if status != 200 or resp is None:
-            raise InvalidResponse
-
+        resp = await request(list_links_url, params=list_links_params, f=to_json)
         result = resp['result']
 
         m = re.search(rf'data-id="{ver}" style="display: (?:none)?;">.+?data-lid="([\w-]+)"', result)
@@ -197,25 +194,20 @@ class Megaup:
             "_": encrypt_param(data_lid)
         }
 
-        status, resp = await request(links_view_url, params=links_view_params, f=lambda r: r.json())
-        if status != 200 or resp is None:
-            raise InvalidResponse
-
+        resp = await request(links_view_url, params=links_view_params, f=to_json)
         return resp['result']
 
     @staticmethod
     def decrypt_iframe(cipher: str) -> dict:
         data = apply_rounds(base64.urlsafe_b64decode(cipher + "=="), IFRAME_ROUNDS)
-        res = ''.join(chr(i) for i in data)
+        res = data.decode("latin-1")
         return json.loads(urllib.parse.unquote(res))
 
     @staticmethod
     async def decrypt_sources(iframe: str) -> dict:
-        status, resp = await request(iframe, f=lambda r: r.text())
-        assert(status == 200) 
-        assert(resp is not None)
+        resp = await request(iframe, f=to_text)
         
-        m = re.search(r'iframe src="(https:\/\/megaup.n.\/e\/\w+)\?"', resp)
+        m = re.search(r'iframe src="(https:\/\/megaup.n.\/e\/[\w-]+)\?"', resp)
         if not m:
             raise ValueError("embedded url not found")
         
@@ -228,15 +220,13 @@ class Megaup:
         cookies = {cookie_key: cookie_val}
         headers = {"User-Agent": USER_AGENT, "Referer": embedded_url}
 
-        status, resp = await request(
+        resp = await request(
             embedded_url, 
             cookies=cookies, 
             headers=headers, 
             params={"autostart": "true"}, 
-            f=lambda r: r.json()
+            f=to_json
         )
-        assert(status == 200)
-        assert(resp is not None)
 
         user_agent_key = re.sub(r"[^A-Z0-9]", "", USER_AGENT)[-30:]
 
@@ -258,12 +248,12 @@ class Megaup:
 
         sources = resp['result']
         data = apply_rounds(base64.urlsafe_b64decode(sources + "=="), SOURCES_ROUNDS, t_key_apply_transform)
-        res = ''.join(chr(i) for i in data)
+        res = data.decode("latin-1")
         return json.loads(urllib.parse.unquote(res))
 
 
     @classmethod
-    async def exctract(cls, url: str, ep: int, ver: Literal['sub', 'softsub', 'dub']) -> EpisodeSources:
+    async def extract(cls, url: str, ep: int, ver: Literal['sub', 'softsub', 'dub']) -> EpisodeSources:
         iframe = await cls.get_iframe(url, ep, ver)
         embedded = cls.decrypt_iframe(iframe)
 

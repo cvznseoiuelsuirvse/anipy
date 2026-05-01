@@ -4,7 +4,7 @@ import base64
 import json
 
 from ...core.types import EpisodeSources
-from ...core.exceptions import ExtractorInvalidResponse
+from ...core.exceptions import InvalidResponse
 
 
 KEY = hashlib.sha256(b"Xot36i3lK3:v1").digest()
@@ -63,4 +63,4 @@ class AllAnime:
                 )
 
 
-        raise ExtractorInvalidResponse('Yt-mp4 source not found')
+        raise InvalidResponse('Yt-mp4 source not found')

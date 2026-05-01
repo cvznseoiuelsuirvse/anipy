@@ -4,14 +4,14 @@ import sqlite3
 
 from typing import Literal, get_origin, get_args
 
-from .types import DataObject, DataList, LockFileKeys, Serializable
-from ..providers import ProviderTypes
+from .types import DataObject, DataObjectDict, DataList, LockFileKeys, Serializable, Any
+from ..providers import Providers
 
 def get_user_config_dir() -> str:
     if os.name == "posix":
         path = os.path.join(os.environ["HOME"], ".config", "anipy")
     else:
-        path = os.path.joni(os.environ["APPDATA"], "anipy")
+        path = os.path.join(os.environ["APPDATA"], "anipy")
 
     if not os.path.exists(path):
         os.makedirs(path)
@@ -23,7 +23,7 @@ def get_user_data_dir() -> str:
     if os.name == "posix":
         path = os.path.join(os.environ["HOME"], ".local", "share", "anipy")
     else:
-        path = os.path.joni(os.environ["APPDATA"], "anipy")
+        path = os.path.join(os.environ["APPDATA"], "anipy")
 
     if not os.path.exists(path):
         os.makedirs(path)
@@ -57,9 +57,9 @@ def lock_file_get_content() -> dict:
 
 
 class Config:
-    banner:     list[str]               = ["continue watching", "highlighted"]
-    provider:   ProviderTypes           = ProviderTypes.HIANIME
-    prompt:     str                     = "{} > "
+    banner:     list[str]  = ["continue watching", "highlighted"]
+    provider:   Providers  = Providers.HIANIME
+    prompt:     str        = "{} > "
 
     def __init__(self) -> None:
         self.__path = os.path.join(get_user_config_dir(), "settings.json")
@@ -70,7 +70,7 @@ class Config:
                 self.__obj = json.load(f)
                 for k, v in self.__obj.items():
                     if k == "provider":
-                        setattr(self, k, ProviderTypes(v))
+                        setattr(self, k, Providers(v))
 
                     else:
                         setattr(self, k, v)
@@ -170,7 +170,7 @@ class DBManager:
         self.con.execute(query)
         self.con.commit()
 
-    def select(self, table: str, conditions: list[Condition] | None = None) -> list[dict]:
+    def select(self, table: str, conditions: list[Condition] | None = None) -> list[Any]:
         if conditions:
             params = [v for c in conditions for v in c.values]
             query = f"SELECT * FROM {table} WHERE {' AND '.join(map(str, conditions))}"
@@ -182,14 +182,18 @@ class DBManager:
         cur = self.con.execute(query, params)
         return list(map(dict, cur.fetchall()))
 
-    def insert(self, table: str, row: dict) -> None:
+    def insert(self, table: str, row: dict) -> int:
         placeholders = ", ".join(["?"] * len(row))
         keys, values = zip(*sorted(row.items()))
 
         query = f"INSERT OR REPLACE INTO {table} ({', '.join(keys)}) VALUES ({placeholders})"
 
-        self.con.execute(query, values)
+        cur = self.con.execute(query, values)
         self.con.commit()
+
+        assert cur.lastrowid is not None
+
+        return cur.lastrowid
 
     def insert_many(self, table: str, rows: list[dict]) -> None:
         placeholders = ", ".join(["?"] * len(rows[0]))
@@ -229,12 +233,12 @@ class DBManager:
 
 
 class LocalDB:
-    def __init__(self, provider: ProviderTypes) -> None:
+    def __init__(self, config: Config) -> None:
         db_filename = f"data.db"
         self.__path = os.path.join(get_user_data_dir(), db_filename)
 
         self.__db = DBManager(self.__path)
-        self.__provider = provider
+        self.__cfg = config
 
         self.__main_table = "data"
         self.__ids_table =  "ids"
@@ -247,34 +251,30 @@ class LocalDB:
         l = []
 
         for o in self.__db.select(self.__main_table):
-            do = DataObject(o)
-            do.external_id = self.get_external_id(do.id, self.__provider) or ""
+            o: DataObjectDict 
+            do = DataObject(**o)
             l.append(do)
 
         return l
 
     def erase(self) -> None:
         os.remove(self.__path)
-        self.__init__(self.__provider)
+        self.__init__(self.__cfg)
 
-    def add(self, object: DataObject) -> None:
-        data = object.json()
-        data.pop("external_id")
+    def add(self, anime: DataObject, external_id: str) -> None:
+        data = anime.json()
+        data.pop("id")
 
-        self.__db.insert(self.__main_table, data)
+        anime.id = self.__db.insert(self.__main_table, data)
+        self.add_id(anime.id, external_id, self.__cfg.provider)
 
-        last = self.__db.select(self.__main_table, [Condition("added_at", "=", [object.added_at])])[0]
-        object.id = last['id']
-
-        self.add_id(object, self.__provider)
-
-    def add_id(self, object: DataObject, source: str) -> None:
+    def add_id(self, internal_id: int, external_id: str, source: str) -> None:
         self.__db.insert(
             self.__ids_table, 
             {
-                "id": object.id, 
+                "id": internal_id,
                 "source": source,
-                "external_id": object.external_id
+                "external_id": external_id
             }
         )
 
@@ -289,16 +289,13 @@ class LocalDB:
 
         return res[0]['external_id']
 
-    def update(self, object: DataObject) -> None:
-        d = object.json()
+    def update(self, anime: DataObject) -> None:
+        d = anime.json()
+        self.__db.update(self.__main_table, d, [Condition("id", "=", [anime.id])])
 
-        d.pop("external_id")
-
-        self.__db.update(self.__main_table, d, [Condition("id", "=", [object.id])])
-
-    def remove(self, object: DataObject) -> None:
-        self.__db.delete(self.__ids_table, [Condition("id", "=", [object.id])])
-        self.__db.delete(self.__main_table, [Condition("id", "=", [object.id])])
+    def remove(self, anime: DataObject) -> None:
+        self.__db.delete(self.__ids_table, [Condition("id", "=", [anime.id])])
+        self.__db.delete(self.__main_table, [Condition("id", "=", [anime.id])])
 
     def _create_main_table(self) -> None:
         self.__db.create(
@@ -341,9 +338,8 @@ class LocalDB:
 
 
 class Data:
-    def __init__(self, provider: ProviderTypes) -> None:
-        self.local = LocalDB(provider)
-        self.provider = provider
+    def __init__(self, config: Config) -> None:
+        self.local = LocalDB(config)
         self.data: list[DataObject]
 
     @property
@@ -361,24 +357,23 @@ class Data:
     def load(self) -> None:
         self.data = self.local.get_all()
 
-    def add(self, object: DataObject) -> None:
-        self.local.add(object)
-        self.data.append(object)
+    def add(self, anime: DataObject, external_id: str) -> None:
+        self.local.add(anime, external_id)
+        self.data.append(anime)
 
-    def add_id(self, object: DataObject, external_id: str, source: str) -> None:
-        object.external_id = external_id
-        if not self.get_id(object.id, source):
-            self.local.add_id(object, source)
+    def add_id(self, internal_id: int, external_id: str, source: str) -> None:
+        if not self.get_id(internal_id, source):
+            self.local.add_id(internal_id, external_id, source)
 
     def get_id(self, internal_id: int, source: str) -> str | None:
         return self.local.get_external_id(internal_id, source)
 
-    def update(self, object: DataObject) -> None:
-        self.local.update(object)
+    def update(self, anime: DataObject) -> None:
+        self.local.update(anime)
 
-    def remove(self, object: DataObject) -> None:
-        self.data.remove(object)
-        self.local.remove(object)
+    def remove(self, anime: DataObject) -> None:
+        self.data.remove(anime)
+        self.local.remove(anime)
 
 
 if __name__ == "__main__": ...
