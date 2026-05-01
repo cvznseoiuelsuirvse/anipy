@@ -34,9 +34,16 @@ class MALListStatuses(StrEnum):
     DROPPED       = "dropped"
     PLAN_TO_WATCH = "plan_to_watch"
 
+@dataclass
+class MALListStatus:
+    status:                 MALListStatuses
+    score:                  int
+    num_episodes_watched:   int
+
 @dataclass 
-class MALAnimeInfo(AnimeInfo):
-    list_status: MALListStatuses | None
+class MALAnimeInfo:
+    info: AnimeInfo
+    list_status: MALListStatus | None
 
 def extract_base(node: dict) -> dict:
     description = node.get('synopsis', "None")
@@ -66,7 +73,7 @@ def extract_base(node: dict) -> dict:
     episode_count = node['num_episodes']
     episode_duration = node['average_episode_duration'] * 1000
 
-    return {
+    ret = {
         "mal_id":           node['id'],
         "external_id":      node['id'],
         "title":            node['alternative_titles'].get('en', node['title']), 
@@ -79,21 +86,23 @@ def extract_base(node: dict) -> dict:
         "episode_count":    episode_count,
         "episode_duration": episode_duration,
     }
+    if node.get("my_list_status"):
+        my_list_status = node['my_list_status']
+        ret["my_list_status"] = {
+            "status": my_list_status["status"],
+            "score":  my_list_status["score"],
+            "num_episodes_watched": my_list_status["num_episodes_watched"],
+        }
+
+    return ret
 
 
-def list_dict_to_cls(d: dict) -> MALAnimeInfo:
-    node = d['node']
+
+def info_dict_to_cls(node: dict) -> MALAnimeInfo:
     base = extract_base(node)
 
-    st = MALListStatuses(d['list_status']['status'])
-
-    return MALAnimeInfo(**base, list_status=st)
-
-def info_dict_to_cls(d: dict) -> MALAnimeInfo:
-    base = extract_base(d)
-
-    if d.get('my_list_status'):
-        st = MALListStatuses(d['my_list_status']['status'])
+    if base.get('my_list_status'):
+        st = MALListStatus(**base.pop("my_list_status"))
 
     else:
         st = None
@@ -228,7 +237,7 @@ class MAL:
         }
 
         resp = await self.make_request("GET", url, params=params)
-        return info_dict_to_cls(resp)
+        return info_dict_to_cls(resp).info
 
 
     @_check_token
@@ -257,6 +266,7 @@ class MAL:
         params: dict = {
             "limit": 1000,
             "offset": offset,
+            "fields": "alternative_titles,synopsis,genres,average_episode_duration,media_type,status,my_list_status,num_episodes,start_season",
         }
 
         if list_status is not None:
@@ -267,7 +277,7 @@ class MAL:
 
         l = []
         for d in data:
-            l.append(list_dict_to_cls(d))
+            l.append(info_dict_to_cls(d['node']))
 
         return l
 

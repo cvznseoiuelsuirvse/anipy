@@ -8,7 +8,7 @@ from typing import Callable, Iterable, Literal, overload
 from ..core.types import LockFileKeys, DataList, SearchList, DataObject, SearchObject, EpisodeSources
 from ..core.exceptions import InvalidResponse, InvalidStatusCode
 from ..core.data import Data, Config, lock_file_update, lock_file_get_content
-from ..core.util import is_similar, resolve_to_mal
+from ..core.util import resolve_to_mal
 from ..integrations.mal import MAL, MALListStatuses
 from .builder import CLIApp, ErrorTypes
 
@@ -16,7 +16,7 @@ from .builder import CLIApp, ErrorTypes
 from .player import Player
 
 cfg         = Config()
-data        = Data(cfg)
+data        = Data()
 provider    = lambda: cfg.provider.cls
 mal         = MAL()
 ctx: DataList | SearchList
@@ -234,12 +234,17 @@ async def watchlist_add(id: int):
         return cli.raise_err(ErrorTypes.INVALID_CONTEXT, "context must be Search type")
 
     anime = ctx[id]
-    anime_info = await provider().get_anime(anime.external_id)
+    mal_id = await get_mal_id(anime)
+    if not mal_id:
+        return cli.raise_err(ErrorTypes.INVALID_RESULT, "mal_id not found")
+
+    anime_info = await mal.get_anime(mal_id)
 
     anime_info_json = anime_info.json()
 
     if anime_info.mal_id:
         anime_info_json.pop("mal_id")
+
     anime_info_json.pop("external_id")
     anime_info_json.pop("description")
     anime_info_json.pop("genres")
@@ -248,21 +253,12 @@ async def watchlist_add(id: int):
     anime_info_json["added_at"] = int(time.time())
 
     do = DataObject(**anime_info_json)
-    data.add(do, anime_info.external_id)
 
-    try:
-        if anime_info.mal_id:
-            data.add_id(do.id, anime_info.mal_id, "mal")
-            mal_id = anime_info.mal_id
+    data.add(do)
+    data.add_id(do.id, anime_info.external_id, cfg.provider)
+    data.add_id(do.id, mal_id, "mal")
 
-        else:
-            mal_id =  await check_mal_external_id(do)
-
-        await mal.list_add(mal_id, 0, MALListStatuses.PLAN_TO_WATCH)
-
-    except Exception as e:
-        cli.raise_err(ErrorTypes.INVALID_RESULT, str(e), do.title)
-        data.remove(do)
+    await mal.list_add(mal_id, 0, MALListStatuses.PLAN_TO_WATCH)
 
 
 @cli.on(["wl-rm"], {"id": lambda id: id in range(0, len(ctx))})
@@ -561,6 +557,49 @@ def completed_reset(id: int):
         anime.added_at = int(time.time())
 
     data.update(anime)
+
+@cli.on()
+async def mal_sync():
+    if data.data:
+        return cli.raise_err(ErrorTypes.INVALID_CONTEXT, "data is not empty")
+
+    animes = await mal.list_get()
+    for mal_info in animes:
+        anime_info = mal_info.info
+        list_info = mal_info.list_status
+
+        assert list_info and anime_info.mal_id
+
+        anime_info_json = anime_info.json()
+
+        anime_info_json.pop("mal_id")
+        anime_info_json.pop("external_id")
+        anime_info_json.pop("description")
+        anime_info_json.pop("genres")
+
+        anime_info_json["added_at"] = int(time.time())
+
+        do = DataObject(**anime_info_json)
+
+        match list_info.status:
+            case MALListStatuses.PLAN_TO_WATCH:
+                do.status = "watchlist"
+
+            case MALListStatuses.WATCHING:
+                do.status = "watchlist"
+                do.continue_from = list_info.num_episodes_watched + 1
+
+            case MALListStatuses.DROPPED:
+                do.status = "dropped"
+
+            case MALListStatuses.COMPLETED:
+                do.status = "completed"
+
+            case _:
+                continue
+
+        data.add(do)
+        data.add_id(do.id, anime_info.mal_id, "mal")
 
 @cli.on()
 async def refresh():

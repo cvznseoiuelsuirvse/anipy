@@ -58,7 +58,7 @@ def lock_file_get_content() -> dict:
 
 class Config:
     banner:     list[str]  = ["continue watching", "highlighted"]
-    provider:   Providers  = Providers.HIANIME
+    provider:   Providers  = Providers.ALLMANGA
     prompt:     str        = "{} > "
 
     def __init__(self) -> None:
@@ -233,12 +233,11 @@ class DBManager:
 
 
 class LocalDB:
-    def __init__(self, config: Config) -> None:
+    def __init__(self) -> None:
         db_filename = f"data.db"
         self.__path = os.path.join(get_user_data_dir(), db_filename)
 
         self.__db = DBManager(self.__path)
-        self.__cfg = config
 
         self.__main_table = "data"
         self.__ids_table =  "ids"
@@ -246,6 +245,14 @@ class LocalDB:
         self._create_main_table()
         self._create_ids_table()
 
+
+    def get(self, internal_id: int) -> DataObject | None:
+        animes = self.__db.select(self.__main_table, conditions=[Condition("id", "=", [internal_id])])
+        if not animes:
+            return None
+
+        anime: DataObjectDict = animes[0]
+        return DataObject(**anime)
 
     def get_all(self) -> list[DataObject]:
         l = []
@@ -259,14 +266,12 @@ class LocalDB:
 
     def erase(self) -> None:
         os.remove(self.__path)
-        self.__init__(self.__cfg)
 
-    def add(self, anime: DataObject, external_id: str) -> None:
+    def add(self, anime: DataObject) -> None:
         data = anime.json()
         data.pop("id")
 
         anime.id = self.__db.insert(self.__main_table, data)
-        self.add_id(anime.id, external_id, self.__cfg.provider)
 
     def add_id(self, internal_id: int, external_id: str, source: str) -> None:
         self.__db.insert(
@@ -338,8 +343,8 @@ class LocalDB:
 
 
 class Data:
-    def __init__(self, config: Config) -> None:
-        self.local = LocalDB(config)
+    def __init__(self) -> None:
+        self.local = LocalDB()
         self.data: list[DataObject]
 
     @property
@@ -357,8 +362,8 @@ class Data:
     def load(self) -> None:
         self.data = self.local.get_all()
 
-    def add(self, anime: DataObject, external_id: str) -> None:
-        self.local.add(anime, external_id)
+    def add(self, anime: DataObject) -> None:
+        self.local.add(anime)
         self.data.append(anime)
 
     def add_id(self, internal_id: int, external_id: str, source: str) -> None:
