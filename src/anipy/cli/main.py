@@ -36,12 +36,12 @@ def get_longest_values(animes: Iterable) -> dict[str, int]:
     return r
 
 @overload
-def format_ctx_list(ctx: DataList | SearchList) -> str: ...
+def display_ctx(ctx: DataList | SearchList) -> str: ...
 @overload
-def format_ctx_list(ctx: DataList, validate: Callable[[int, DataObject], bool]) -> str: ...
+def display_ctx(ctx: DataList, validate: Callable[[int, DataObject], bool]) -> str: ...
 @overload
-def format_ctx_list(ctx: SearchList, validate: Callable[[int, SearchObject], bool]) -> str: ...
-def format_ctx_list(ctx: DataList | SearchList, validate: Callable[[int, DataObject], bool] | Callable[[int, SearchObject], bool] | None = None) -> str:
+def display_ctx(ctx: SearchList, validate: Callable[[int, SearchObject], bool]) -> str: ...
+def display_ctx(ctx: DataList | SearchList, validate: Callable[[int, DataObject], bool] | Callable[[int, SearchObject], bool] | None = None) -> str:
     longest_values = get_longest_values(ctx)
     longest_index = len(str(len(ctx) - 1))
 
@@ -50,7 +50,7 @@ def format_ctx_list(ctx: DataList | SearchList, validate: Callable[[int, DataObj
     if isinstance(ctx, SearchList):
         longest_ep_count = longest_values["episode_count"]
         for i, anime in enumerate(ctx):
-            line = f"  {str(i):<{longest_index}}  {str(anime.episode_count):>{longest_ep_count}} {anime.title}"
+            line = f"  {str(i):<{longest_index}}  {str(anime.episode_count):>{longest_ep_count}} {anime.title or anime.other_title}"
 
             if call_validate(validate, i, anime):
                 ret.append(line)
@@ -91,8 +91,8 @@ async def get_episode(*, id: int, episode: int) -> EpisodeSources | None:
 
 async def update_watchlist(force: bool) -> None:
     async def uw(anime: DataObject):
-        mal_id = await check_mal_external_id(anime)
-        anime_new = await mal.get_anime(mal_id)
+        mal_id = await check_provider_external_id(anime)
+        anime_new = await provider().get_anime(mal_id)
 
         for k, v in anime_new.json().items():
             if not k.startswith("_") and hasattr(anime, k):
@@ -125,10 +125,10 @@ def show_banner() -> None:
         print(f"\033[1m{b}\033[0m")
         match b:
             case "continue watching":
-                print(format_ctx_list(ctx, lambda _, anime: True if anime.continue_from > 1 else False))
+                print(display_ctx(ctx, lambda _, anime: True if anime.continue_from > 1 else False))
 
             case "highlighted":
-                print(format_ctx_list(ctx, lambda _, anime: True if anime.highlighted else False))
+                print(display_ctx(ctx, lambda _, anime: True if anime.highlighted else False))
 
             case "status":
                 watchlist_size = len(data.watchlist)
@@ -160,9 +160,9 @@ async def get_mal_id(anime: SearchObject | DataObject) -> str | None:
 
     else:
         for r in res:
-            if anime.title.lower() == r.title.lower() or \
-                anime.other_title.lower() == r.other_title.lower():
-                return r.external_id
+            if (anime.title and anime.title.lower() == r.title.lower()) or \
+                    anime.other_title.lower() == r.other_title.lower():
+                    return r.external_id
 
     id = await resolve_to_mal(anime.title, anime.other_title, return_id=True)
     if id:
@@ -173,9 +173,17 @@ async def check_mal_external_id(anime: DataObject) -> str:
     if mal_id := data.get_id(anime.id, "mal"): return mal_id
 
     mal_id = await get_mal_id(anime)
-    if mal_id: return mal_id 
+    if mal_id: 
+        data.add_id(anime.id, mal_id, "mal")
+        return mal_id 
 
-    raise ValueError(f'failed to get MAL external_id')
+    cli.raise_err(ErrorTypes.INVALID_RESULT, "failed to get MAL external_id. look it up manually")
+
+    while not mal_id:
+        mal_id = input(f"{anime.title}: ")
+
+    data.add_id(anime.id, mal_id, "mal")
+    return mal_id
 
 
 cli = CLIApp()
@@ -195,7 +203,7 @@ async def search(title: str):
     ctx = SearchList(resp, title)
     cli.prompt = cfg.prompt.format(ctx.name)
     if resp:
-        print(format_ctx_list(ctx))
+        print(display_ctx(ctx))
 
 
 @cli.on(validate={"id": lambda id: id in range(0, len(ctx))})
@@ -330,7 +338,7 @@ def select_data_list(type: Literal["watchlist", "completed", "dropped"], part: s
         else:
             range_to_show = range(ctx_len - n, ctx_len)
 
-        print(format_ctx_list(ctx, lambda i, _: True if i in range_to_show else False))
+        print(display_ctx(ctx, lambda i, _: True if i in range_to_show else False))
 
 @cli.on(["wl"], {"part": lambda part: part in ("head", "tail", "all")})
 def watchlist(part: str | None = None, n: int | None = None) -> None:
@@ -559,49 +567,6 @@ def completed_reset(id: int):
     data.update(anime)
 
 @cli.on()
-async def mal_sync():
-    if data.data:
-        return cli.raise_err(ErrorTypes.INVALID_CONTEXT, "data is not empty")
-
-    animes = await mal.list_get()
-    for mal_info in animes:
-        anime_info = mal_info.info
-        list_info = mal_info.list_status
-
-        assert list_info and anime_info.mal_id
-
-        anime_info_json = anime_info.json()
-
-        anime_info_json.pop("mal_id")
-        anime_info_json.pop("external_id")
-        anime_info_json.pop("description")
-        anime_info_json.pop("genres")
-
-        anime_info_json["added_at"] = int(time.time())
-
-        do = DataObject(**anime_info_json)
-
-        match list_info.status:
-            case MALListStatuses.PLAN_TO_WATCH:
-                do.status = "watchlist"
-
-            case MALListStatuses.WATCHING:
-                do.status = "watchlist"
-                do.continue_from = list_info.num_episodes_watched + 1
-
-            case MALListStatuses.DROPPED:
-                do.status = "dropped"
-
-            case MALListStatuses.COMPLETED:
-                do.status = "completed"
-
-            case _:
-                continue
-
-        data.add(do)
-        data.add_id(do.id, anime_info.mal_id, "mal")
-
-@cli.on()
 async def refresh():
     """refresh watchlist"""
     await update_watchlist(True)
@@ -617,8 +582,13 @@ async def main_():
     await update_watchlist(False)
 
     show_banner()
+
     await cli.run()
 
 
 def main():
-    asyncio.run(main_())
+    try:
+        asyncio.run(main_())
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return

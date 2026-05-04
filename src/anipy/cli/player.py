@@ -192,7 +192,7 @@ class Player:
         args.append(video_file)
         proc = subprocess.run(args, capture_output=True)
         if proc.returncode != 0:
-            raise SystemError(proc.stdout.decode())
+            raise SystemError(proc.stderr.decode())
 
     async def download_file(self, ep_sources: EpisodeSources, output_dir: str) -> None:
         filename_base = gen_string(10)

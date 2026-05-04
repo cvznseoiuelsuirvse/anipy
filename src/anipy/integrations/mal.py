@@ -41,8 +41,7 @@ class MALListStatus:
     num_episodes_watched:   int
 
 @dataclass 
-class MALAnimeInfo:
-    info: AnimeInfo
+class MALAnimeInfo(AnimeInfo):
     list_status: MALListStatus | None
 
 def extract_base(node: dict) -> dict:
@@ -237,7 +236,7 @@ class MAL:
         }
 
         resp = await self.make_request("GET", url, params=params)
-        return info_dict_to_cls(resp).info
+        return info_dict_to_cls(resp)
 
 
     @_check_token

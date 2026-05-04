@@ -38,7 +38,7 @@ async def resolve_to_mal(title: str, other_title: str, *, return_id: bool = Fals
         anime_href = a.attrib["href"]
         anime_id = a.attrib["data-l-content-id"]
 
-        if anime_title.lower() in (title.lower(), other_title.lower()):
+        if anime_title.lower() in ((title and title.lower() or ""), other_title.lower()):
             return anime_id if return_id else anime_href
 
     return None
