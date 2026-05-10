@@ -14,4 +14,3 @@ dependencies = [
 
 [project.scripts]
 anipy = "anipy.cli.main:main"
-anipyweb = "anipy.web.app:main"

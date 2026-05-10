@@ -1,8 +1,10 @@
 import asyncio
 import aiohttp
+import math
 import os
 import re
 import shutil
+import requests
 import time
 import subprocess
 import tempfile
@@ -121,43 +123,64 @@ class VideoDownloader:
         pb.update()
 
     async def download(self, url: str, output_file: str) -> None:
-        hls = HLSClient(self.session, self.headers)
-        segments = await hls.extract_segments(url)
+        content_type = requests.get(url).headers['content-type']
+        if content_type == "application/octet-stream":
+            async def write_file(resp: aiohttp.ClientResponse):
+                if not resp.content_length:
+                    raise InvalidResponse("content_length is None or 0")
 
-        progress = ProgressBar(len(segments), os.path.basename(output_file))
+                chunk_size = 8192
+                progress = ProgressBar(math.ceil(resp.content_length / chunk_size), os.path.basename(output_file))
 
-        t = int(time.time() * 1000000)
-        val = (t & 0xffffff) + (t >> 32)
-        id = hex(val)
+                with open(output_file, "wb") as f:
+                    while True:
+                        chunk = await resp.content.read(chunk_size)
+                        if not chunk:
+                            break
 
-        out_dir = get_temp_dir()
-        
-        tasks = [self._write_segment(id, seg, out_dir, progress) for seg in segments]
-        await asyncio.gather(*tasks)
+                        f.write(chunk)
+                        progress.update()
 
-        _, playlist_file = tempfile.mkstemp(dir=out_dir)
+            await make_request(self.session, "get", url, self.headers, write_file)
 
-        segments = []
-        for file in os.listdir(out_dir):
-            seg = re.match(rf"({id}_seg\d+)", file)
-            if seg:
-                abs_path = os.path.join(out_dir, seg.group(1))
-                segments.append(abs_path)
+        else:
+            hls = HLSClient(self.session, self.headers)
+            segments = await hls.extract_segments(url)
 
-        segments = sorted(segments, key=lambda i: int(i.split("seg")[1]))
+            progress = ProgressBar(len(segments), os.path.basename(output_file))
 
-        with open(playlist_file, "wb") as f:
-            for seg in segments:
-                with open(seg, "rb") as fseg:
-                    f.write(fseg.read())
+            t = int(time.time() * 1000000)
+            val = (t & 0xffffff) + (t >> 32)
+            id = hex(val)
 
-                os.remove(seg)
+            out_dir = get_temp_dir()
 
-        cmd = ["ffmpeg", "-i", playlist_file, "-c:v", "copy", "-c:a", "copy", output_file]
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+            tasks = [self._write_segment(id, seg, out_dir, progress) for seg in segments]
+            await asyncio.gather(*tasks)
 
-        os.remove(playlist_file)
-        self.cleanup()
+            _, playlist_file = tempfile.mkstemp(dir=out_dir)
+
+            segments = []
+            for file in os.listdir(out_dir):
+                seg = re.match(rf"({id}_seg\d+)", file)
+                if seg:
+                    abs_path = os.path.join(out_dir, seg.group(1))
+                    segments.append(abs_path)
+
+            segments = sorted(segments, key=lambda i: int(i.split("seg")[1]))
+
+            with open(playlist_file, "wb") as f:
+                for seg in segments:
+                    with open(seg, "rb") as fseg:
+                        f.write(fseg.read())
+
+                    os.remove(seg)
+
+            cmd = ["ffmpeg", "-i", playlist_file, "-c:v", "copy", "-c:a", "copy", output_file]
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+
+            os.remove(playlist_file)
+            self.cleanup()
 
 
 class Player:

@@ -1,6 +1,7 @@
 import os
 import time
 import asyncio
+import datetime
 import webbrowser
 
 from typing import Callable, Iterable, Literal, overload
@@ -61,12 +62,16 @@ def display_ctx(ctx: DataList | SearchList, validate: Callable[[int, DataObject]
                 line = f"* {str(i):<{longest_index}}  {anime.title}"
             elif anime.continue_from > 1:
                 line = f"> {str(i):<{longest_index}}  {anime.title} {anime.continue_from}/{anime.episode_count}"
+
+            # elif anime.finished_at > 1:
+            #     dt = datetime.datetime.fromtimestamp(anime.finished_at)
+            #     fmt = dt.strftime("%d %b %Y").lower()
+            #     line = f"  {str(i):<{longest_index}}  {fmt}  {anime.title}"
+
             else:
                 line = f"  {str(i):<{longest_index}}  {anime.title}"
 
             if call_validate(validate, i, anime):
-                if anime.id == "school-days-8757":
-                    line = f"\033[7m{line}\033[0m"
                 ret.append(line)
 
     return "\n".join(ret)
@@ -143,7 +148,7 @@ async def check_provider_external_id(anime: DataObject) -> str:
     resp = await provider().search(anime.title)
 
     for a in resp:
-        if a.title.lower() == anime.title.lower() or \
+        if (a.title and a.title.lower() == anime.title.lower()) or \
             anime.other_title.lower() == a.other_title.lower():
 
             data.add_id(anime.id, a.external_id, cfg.provider)
@@ -301,13 +306,14 @@ async def watchlist_drop(id: int):
         return 
 
     anime.status = "dropped"
+    anime.finished_at = int(time.time())
     anime.continue_from = 1
     anime.highlighted = False
 
     data.update(ctx[id])
     await mal.list_add(mal_id, anime.continue_from - 1, MALListStatuses.DROPPED)
 
-def select_data_list(type: Literal["watchlist", "completed", "dropped"], part: str | None, n: int | None):
+def select_list_and_show(type: Literal["watchlist", "completed", "dropped"], part: str | None, n: int | None):
     global ctx
 
     if type == "watchlist":
@@ -342,15 +348,15 @@ def select_data_list(type: Literal["watchlist", "completed", "dropped"], part: s
 
 @cli.on(["wl"], {"part": lambda part: part in ("head", "tail", "all")})
 def watchlist(part: str | None = None, n: int | None = None) -> None:
-    select_data_list("watchlist", part, n)
+    select_list_and_show("watchlist", part, n)
 
 @cli.on(["comp"], {"part": lambda part: part in ("head", "tail", "all")})
 def completed(part: str | None = None, n: int | None = None) -> None:
-    select_data_list("completed", part, n)
+    select_list_and_show("completed", part, n)
 
 @cli.on(["drop"], {"part": lambda part: part in ("head", "tail", "all")})
 def dropped(part: str | None = None, n: int | None = None) -> None:
-    select_data_list("dropped", part, n)
+    select_list_and_show("dropped", part, n)
 
 
 @cli.on(validate={"id": lambda id: id in range(0, len(ctx))})
