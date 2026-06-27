@@ -3,8 +3,11 @@ import json
 import sqlite3
 
 from typing import Literal, get_origin, get_args
+from enum import Enum
 
-from .types import DataObject, DataObjectDict, DataList, LockFileKeys, Serializable, Any
+from attr import dataclass
+
+from .types import DataObject, DataList, LockFileKeys, Serializable, Any
 from ..providers import Providers
 
 def get_user_config_dir() -> str:
@@ -141,171 +144,90 @@ class Config:
 
         return d
 
-
-class Condition:
-    def __init__(self, column: str, expression: str, values: list) -> None:
-        self.column = column
-        self.expession = expression.upper()
-        self.values = values
-
-    def __str__(self) -> str:
-        placeholders = ", ".join(["?"] * len(self.values))
-
-        if self.expession == "in":
-            placeholders = f"({placeholders})"
-
-        return f"{self.column} {self.expession} {placeholders}"
-
+def row_factory(cur: sqlite3.Cursor, row: tuple):
+    keys = [t[0] for t in cur.description]
+    return dict(zip(keys, row))
 
 class DBManager:
     def __init__(self, path: str) -> None:
         self.con = sqlite3.connect(path, check_same_thread=False)
-        self.con.row_factory = sqlite3.Row
+        self.con.row_factory = row_factory
 
+        self.cur = self.con.cursor()
 
-    def create(self, table: str, fields: dict) -> None:
-        columns = ",\n\t".join([f"{k} {v}" if v is not None else k for k, v in fields.items()])
+    def create_table(self, table: str, scheme: dict) -> None:
+        columns = ",\n\t".join([f"{k} {v}" if v is not None else k for k, v in scheme.items()])
         query = f"CREATE TABLE IF NOT EXISTS {table} (\n    {columns}\n);"
 
-        self.con.execute(query)
+        self.cur.execute(query)
         self.con.commit()
 
-    def select(self, table: str, conditions: list[Condition] | None = None) -> list[Any]:
-        if conditions:
-            params = [v for c in conditions for v in c.values]
-            query = f"SELECT * FROM {table} WHERE {' AND '.join(map(str, conditions))}"
+    def select_one(self, table: str, filters: dict[str, Any]) -> dict | None:
+        query = f"SELECT * FROM {table} WHERE {' AND '.join(k+' = ?' for k in filters.keys())}"
+
+        cur = self.con.execute(query, (*filters.values(),))
+        return cur.fetchone()
+
+
+    def select_all(self, table: str, filters: dict[str, Any] | None = None) -> list[dict]:
+        if filters:
+            query = f"SELECT * FROM {table} WHERE {' AND '.join(k+' = ?' for k in filters.keys())}"
+            cur = self.con.execute(query, (*filters.values(),))
 
         else:
-            params = []
             query = f"SELECT * FROM {table}"
+            cur = self.con.execute(query)
 
-        cur = self.con.execute(query, params)
-        return list(map(dict, cur.fetchall()))
+        return cur.fetchall()
 
     def insert(self, table: str, row: dict) -> int:
-        placeholders = ", ".join(["?"] * len(row))
-        keys, values = zip(*sorted(row.items()))
+        columns = ", ".join(row.keys())
+        placeholders = ", ".join(":"+k for k in row.keys())
+        query = f"INSERT INTO {table} ({columns}) VALUES ({placeholders})"
 
-        query = f"INSERT OR REPLACE INTO {table} ({', '.join(keys)}) VALUES ({placeholders})"
-
-        cur = self.con.execute(query, values)
+        cur = self.con.execute(query, row)
         self.con.commit()
 
         assert cur.lastrowid is not None
-
         return cur.lastrowid
 
-    def insert_many(self, table: str, rows: list[dict]) -> None:
-        placeholders = ", ".join(["?"] * len(rows[0]))
-        keys = ""
-        values = []
+    def insert_many(self, table: str, rows: list[dict]) -> int:
+        columns = ", ".join(rows[0].keys())
+        placeholders = ", ".join(":"+k for k in rows[0].keys())
+        query = f"INSERT INTO {table} ({columns}) VALUES ({placeholders})"
 
-        for row in rows:
-            row = dict(sorted(row.items()))
-            if not keys:
-                keys = ", ".join(row.keys())
-
-            values.append(tuple(row.values()))
-
-        query = f"INSERT INTO {table} ({keys}) VALUES ({placeholders})"
-
-        self.con.executemany(query, values)
+        cur = self.con.executemany(query, rows)
         self.con.commit()
 
-    def update(self, table: str, data: dict, conditions: list[Condition]) -> None:
+        assert cur.lastrowid is not None
+        return cur.lastrowid
+
+    def update(self, table: str, data: dict, filters: dict[str, Any]) -> None:
         placeholders = ", ".join([f"{k} = ?" for k in data.keys()])
-        query = f"UPDATE {table} SET {placeholders} WHERE {' AND '.join(map(str, conditions))}"
+        query = f"UPDATE {table} SET {placeholders} WHERE {' AND '.join(k+' = ?' for k in filters.keys())}"
 
-        params = list(data.values()) + [v for c in conditions for v in c.values]
-
-        self.con.execute(query, params)
+        self.con.execute(query, (*data.values(), *filters.values()))
         self.con.commit()
 
-    def delete(self, table: str, conditions: list[Condition]) -> None:
-        params = [v for c in conditions for v in c.values]
-        query = f"DELETE FROM {table} WHERE {' AND '.join(map(str, conditions))}"
+    def delete(self, table: str, filters: dict[str, Any]) -> None:
+        query = f"DELETE FROM {table} WHERE {' AND '.join(k+' = ?' for k in filters.keys())}"
 
-        self.con.execute(query, params)
+        self.con.execute(query, (*filters.values(),))
         self.con.commit()
 
     def close(self) -> None:
         self.con.close()
 
 
-class LocalDB:
-    def __init__(self) -> None:
-        db_filename = f"data.db"
-        self.__path = os.path.join(get_user_data_dir(), db_filename)
+@dataclass
+class DataTable:
+    name:   str
+    scheme: dict
 
-        self.__db = DBManager(self.__path)
-
-        self.__main_table = "data"
-        self.__ids_table =  "ids"
-
-        self._create_main_table()
-        self._create_ids_table()
-
-
-    def get(self, internal_id: int) -> DataObject | None:
-        animes = self.__db.select(self.__main_table, conditions=[Condition("id", "=", [internal_id])])
-        if not animes:
-            return None
-
-        anime: DataObjectDict = animes[0]
-        return DataObject(**anime)
-
-    def get_all(self) -> list[DataObject]:
-        l = []
-
-        for o in self.__db.select(self.__main_table):
-            o: DataObjectDict 
-            do = DataObject(**o)
-            l.append(do)
-
-        return l
-
-    def erase(self) -> None:
-        os.remove(self.__path)
-
-    def add(self, anime: DataObject) -> None:
-        data = anime.json()
-        data.pop("id")
-
-        anime.id = self.__db.insert(self.__main_table, data)
-
-    def add_id(self, internal_id: int, external_id: str, source: str) -> None:
-        self.__db.insert(
-            self.__ids_table, 
-            {
-                "id": internal_id,
-                "source": source,
-                "external_id": external_id
-            }
-        )
-
-    def get_external_id(self, internal_id: int, source: str) -> str | None:
-        conds = [
-            Condition("id", "=", [internal_id]),
-            Condition("source", "=", [source]),
-        ]
-        res = self.__db.select(self.__ids_table, conds)
-        if not res: 
-            return None
-
-        return res[0]['external_id']
-
-    def update(self, anime: DataObject) -> None:
-        d = anime.json()
-        self.__db.update(self.__main_table, d, [Condition("id", "=", [anime.id])])
-
-    def remove(self, anime: DataObject) -> None:
-        self.__db.delete(self.__ids_table, [Condition("id", "=", [anime.id])])
-        self.__db.delete(self.__main_table, [Condition("id", "=", [anime.id])])
-
-    def _create_main_table(self) -> None:
-        self.__db.create(
-            self.__main_table,
-            {
+class Tables:
+    DATA = DataTable(
+        "data",
+        {
                 "id":               "INTEGER",
 
                 "title":            "TEXT NOT NULL",
@@ -326,59 +248,51 @@ class LocalDB:
                 "status":           "TEXT CHECK(status IN ('watchlist', 'completed', 'dropped'))",
 
                 "PRIMARY KEY (id AUTOINCREMENT)": None,
-            },
-        )
+            }
+    )
 
-    def _create_ids_table(self) -> None:
-        self.__db.create(
-            self.__ids_table,
-            {
-                "id": "INTEGER",
-                "source": "TEXT NOT NULL",
-                "external_id": "TEXT NOT NULL",
+    IDS  = DataTable(
+        "ids", 
+        {
+                "id":           "INTEGER",
+                "source":       "TEXT NOT NULL",
+                "external_id":  "TEXT NOT NULL",
+
                 "PRIMARY KEY (provider, external_id)": None,
                 "FOREIGN KEY (id) REFERENCES data(id)": None,
-            },
-        )
+        }
+    )
 
 
-class Data:
+class Data(DBManager):
     def __init__(self) -> None:
-        self.local = LocalDB()
-        self.data: list[DataObject]
+        db_filename = f"data.db"
+        path = os.path.join(get_user_data_dir(), db_filename)
+
+        super().__init__(path)
+
+        self.create_table(Tables.DATA.name, Tables.DATA.scheme)
+        self.create_table(Tables.IDS.name, Tables.IDS.scheme)
+
 
     @property
     def watchlist(self) -> DataList:
-        return DataList(sorted((o for o in self.data if o.status == "watchlist"), key=lambda o: o.added_at))
+        d = self.select_all(Tables.DATA.name, {"status": "watchlist"})
+        srted = sorted(d, key=lambda o: o['added_at'])
+        return DataList(srted)
 
     @property
     def completed(self) -> DataList:
-        return DataList(sorted((o for o in self.data if o.status == "completed"), key=lambda o: o.finished_at))
+        d = self.select_all(Tables.DATA.name, {"status": "completed"})
+        srted = sorted(d, key=lambda o: o['finished_at'])
+        return DataList(srted)
 
     @property
     def dropped(self) -> DataList:
-        return DataList(sorted((o for o in self.data if o.status == "dropped"), key=lambda o: o.added_at))
+        d = self.select_all(Tables.DATA.name, {"status": "dropped"})
+        srted = sorted(d, key=lambda o: o['added_at'])
+        return DataList(srted)
 
-    def load(self) -> None:
-        self.data = self.local.get_all()
-
-    def add(self, anime: DataObject) -> None:
-        self.local.add(anime)
-        self.data.append(anime)
-
-    def add_id(self, internal_id: int, external_id: str, source: str) -> None:
-        if not self.get_id(internal_id, source):
-            self.local.add_id(internal_id, external_id, source)
-
-    def get_id(self, internal_id: int, source: str) -> str | None:
-        return self.local.get_external_id(internal_id, source)
-
-    def update(self, anime: DataObject) -> None:
-        self.local.update(anime)
-
-    def remove(self, anime: DataObject) -> None:
-        self.data.remove(anime)
-        self.local.remove(anime)
-
-
-if __name__ == "__main__": ...
+    def remove_anime(self, anime: DataObject) -> None:
+        self.delete(Tables.IDS.name, {"id": anime.id})
+        self.delete(Tables.DATA.name, {"id": anime.id})

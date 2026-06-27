@@ -1,14 +1,16 @@
 import os
+import math
+import datetime
 import time
 import asyncio
-import datetime
+import json
 import webbrowser
 
-from typing import Callable, Iterable, Literal, overload
+from typing import Callable, Literal, overload
 
-from ..core.types import LockFileKeys, DataList, SearchList, DataObject, SearchObject, EpisodeSources
+from ..core.types import LockFileKeys, DataList, SearchList, DataObject, SearchObject, EpisodeSources, AnimeInfo
 from ..core.exceptions import InvalidResponse, InvalidStatusCode
-from ..core.data import Data, Config, lock_file_update, lock_file_get_content
+from ..core.data import Data, Tables, Config, lock_file_update, lock_file_get_content
 from ..core.util import resolve_to_mal
 from ..integrations.mal import MAL, MALListStatuses
 from .builder import CLIApp, ErrorTypes
@@ -22,59 +24,61 @@ provider    = lambda: cfg.provider.cls
 mal         = MAL()
 ctx: DataList | SearchList
 
-TERM_WIDTH = lambda: os.get_terminal_size().columns
+def paint_text_progress(text: str, max: int, progress: int) -> str:
+    text_list = list(text)
+    text_len = len(text)
+
+    progress_len = math.ceil(progress / max * text_len)
+
+    for i in range(text_len):
+        if i >= progress_len:
+            text_list[i] = f"{text_list[i]}"
+        else:
+            text_list[i] = f"{text_list[i]}"
 
 
-def get_longest_values(animes: Iterable) -> dict[str, int]:
-    r = {}
-
-    for item in animes:
-        for k, v in vars(item).items():
-            if not k.startswith("_") and not callable(v):
-                length = len(str(v))
-                r[k] = max(r.get(k, 0), length)
-
-    return r
+    return "".join(text_list)
 
 @overload
-def display_ctx(ctx: DataList | SearchList) -> str: ...
+def render_ctx(ctx: DataList | SearchList) -> None: ...
 @overload
-def display_ctx(ctx: DataList, validate: Callable[[int, DataObject], bool]) -> str: ...
+def render_ctx(ctx: DataList, validate: Callable[[int, DataObject], bool]) -> None: ...
 @overload
-def display_ctx(ctx: SearchList, validate: Callable[[int, SearchObject], bool]) -> str: ...
-def display_ctx(ctx: DataList | SearchList, validate: Callable[[int, DataObject], bool] | Callable[[int, SearchObject], bool] | None = None) -> str:
-    longest_values = get_longest_values(ctx)
+def render_ctx(ctx: SearchList, validate: Callable[[int, SearchObject], bool]) -> None: ...
+def render_ctx(ctx: DataList | SearchList, validate: Callable[[int, DataObject], bool] | Callable[[int, SearchObject], bool] | None = None) -> None:
     longest_index = len(str(len(ctx) - 1))
-
-    ret = []
     call_validate = lambda v, i, o: v is None or v(i, o)
+
+
     if isinstance(ctx, SearchList):
-        longest_ep_count = longest_values["episode_count"]
+        w = max(len(str(c.episode_count)) for c in ctx)
+
         for i, anime in enumerate(ctx):
-            line = f"  {str(i):<{longest_index}}  {str(anime.episode_count):>{longest_ep_count}} {anime.title or anime.other_title}"
 
             if call_validate(validate, i, anime):
-                ret.append(line)
+                print(f"  {i:<{longest_index}}  {anime.episode_count:>{w}} {anime.title or anime.other_title}")
 
-    else:
-        for i, anime in enumerate(ctx):
-            if anime.highlighted:
-                line = f"* {str(i):<{longest_index}}  {anime.title}"
-            elif anime.continue_from > 1:
-                line = f"> {str(i):<{longest_index}}  {anime.title} {anime.continue_from}/{anime.episode_count}"
+        return
 
-            # elif anime.finished_at > 1:
-            #     dt = datetime.datetime.fromtimestamp(anime.finished_at)
-            #     fmt = dt.strftime("%d %b %Y").lower()
-            #     line = f"  {str(i):<{longest_index}}  {fmt}  {anime.title}"
+    w = max(len(c.title or c.other_title) for c in ctx)
+    for i, anime in enumerate(ctx):
+        if not call_validate(validate, i, anime): continue
 
-            else:
-                line = f"  {str(i):<{longest_index}}  {anime.title}"
+        if anime.highlighted:
+            print(f"* {i:<{longest_index}}  {anime.title}")
 
-            if call_validate(validate, i, anime):
-                ret.append(line)
+        elif anime.continue_from > 1:
+            print(
+                f"> {i:<{longest_index}}  {anime.title}  {anime.continue_from}/{anime.episode_count}"
+              )
 
-    return "\n".join(ret)
+        elif anime.finished_at > 1:
+            dt = datetime.datetime.fromtimestamp(anime.finished_at)
+            fmt = dt.strftime("%d-%b-%Y").lower()
+            print(f"  {i:<{longest_index}}  {fmt}  {anime.title:<{w}}")
+
+        else:
+            print(f"  {i:<{longest_index}}  {anime.title}")
 
 
 async def get_episode(*, id: int, episode: int) -> EpisodeSources | None:
@@ -106,7 +110,7 @@ async def update_watchlist(force: bool) -> None:
 
                 setattr(anime, k, v)
 
-        data.update(anime)
+        data.update(Tables.DATA.name, anime.json(), {"id": anime.id})
 
     wl_last_updated = lock_file_get_content().get(LockFileKeys.WATCHLIST_LAST_REFRESH, 0)
 
@@ -127,13 +131,13 @@ def show_banner() -> None:
         print()
 
     for b in cfg.banner:
-        print(f"\033[1m{b}\033[0m")
+        print(f"{b}")
         match b:
             case "continue watching":
-                print(display_ctx(ctx, lambda _, anime: True if anime.continue_from > 1 else False))
+                render_ctx(ctx, lambda _, anime: True if anime.continue_from > 1 else False)
 
             case "highlighted":
-                print(display_ctx(ctx, lambda _, anime: True if anime.highlighted else False))
+                render_ctx(ctx, lambda _, anime: True if anime.highlighted else False)
 
             case "status":
                 watchlist_size = len(data.watchlist)
@@ -143,15 +147,17 @@ def show_banner() -> None:
         print()
 
 async def check_provider_external_id(anime: DataObject) -> str:
-    if external_id := data.get_id(anime.id, cfg.provider): return external_id
+    id = data.select_one(Tables.IDS.name, {"id": anime.id, "source": cfg.provider})
+    if id:
+        return id['external_id']
 
-    resp = await provider().search(anime.title)
+    resp = await provider().search(anime.other_title)
 
     for a in resp:
         if (a.title and a.title.lower() == anime.title.lower()) or \
             anime.other_title.lower() == a.other_title.lower():
 
-            data.add_id(anime.id, a.external_id, cfg.provider)
+            data.insert(Tables.IDS.name, {"id": anime.id, "external_id": a.external_id, "source": cfg.provider})
             return a.external_id
 
     raise ValueError("failed to get provider external_id")
@@ -175,11 +181,13 @@ async def get_mal_id(anime: SearchObject | DataObject) -> str | None:
 
 
 async def check_mal_external_id(anime: DataObject) -> str:
-    if mal_id := data.get_id(anime.id, "mal"): return mal_id
+    id = data.select_one(Tables.IDS.name, {"id": anime.id, "source": "mal"})
+    if id:
+        return id["external_id"]
 
     mal_id = await get_mal_id(anime)
     if mal_id: 
-        data.add_id(anime.id, mal_id, "mal")
+        data.insert(Tables.IDS.name, {"id": anime.id, "external_id": mal_id, "source": "mal"})
         return mal_id 
 
     cli.raise_err(ErrorTypes.INVALID_RESULT, "failed to get MAL external_id. look it up manually")
@@ -187,7 +195,7 @@ async def check_mal_external_id(anime: DataObject) -> str:
     while not mal_id:
         mal_id = input(f"{anime.title}: ")
 
-    data.add_id(anime.id, mal_id, "mal")
+    data.insert(Tables.IDS.name, {"id": anime.id, "external_id": mal_id, "source": "mal"})
     return mal_id
 
 
@@ -196,7 +204,7 @@ cli = CLIApp()
 
 @cli.on(["s"])
 async def search(title: str):
-    """search for an anime"""
+    """search anime"""
     global ctx
 
     try:
@@ -207,17 +215,9 @@ async def search(title: str):
 
     ctx = SearchList(resp, title)
     cli.prompt = cfg.prompt.format(ctx.name)
+
     if resp:
-        print(display_ctx(ctx))
-
-
-@cli.on(validate={"id": lambda id: id in range(0, len(ctx))})
-async def mal_search(id: int):
-    """find anime on MAL"""
-    title = ctx[id].title
-
-    url = f"https://myanimelist.net/anime.php?q={title}&cat=anime"
-    webbrowser.open(url)
+        render_ctx(ctx)
 
 
 @cli.on(validate={"id": lambda id: id in range(0, len(ctx))})
@@ -229,7 +229,9 @@ async def mal_page(id: int):
     anime = ctx[id]
     if isinstance(anime, DataObject):
         await check_mal_external_id(anime)
-        mal_id = data.get_id(anime.id, "mal")
+        _id = data.select_one(Tables.IDS.name, {"id": anime.id, "source": "mal"})
+        assert _id
+        mal_id = _id["external_id"]
 
     else:
         mal_id = await resolve_to_mal(anime.title, anime.other_title, return_id=True)
@@ -247,16 +249,19 @@ async def watchlist_add(id: int):
         return cli.raise_err(ErrorTypes.INVALID_CONTEXT, "context must be Search type")
 
     anime = ctx[id]
-    mal_id = await get_mal_id(anime)
-    if not mal_id:
-        return cli.raise_err(ErrorTypes.INVALID_RESULT, "mal_id not found")
 
-    anime_info = await mal.get_anime(mal_id)
-
+    anime_info = await provider().get_anime(anime.external_id)
     anime_info_json = anime_info.json()
 
     if anime_info.mal_id:
+        mal_id = anime_info.mal_id
         anime_info_json.pop("mal_id")
+
+    else:
+        mal_id = await get_mal_id(anime)
+        if not mal_id:
+            return cli.raise_err(ErrorTypes.INVALID_RESULT, "mal_id not found")
+
 
     anime_info_json.pop("external_id")
     anime_info_json.pop("description")
@@ -265,11 +270,12 @@ async def watchlist_add(id: int):
     anime_info_json["status"] = "watchlist"
     anime_info_json["added_at"] = int(time.time())
 
-    do = DataObject(**anime_info_json)
+    print(json.dumps(anime_info_json, indent=2))
 
-    data.add(do)
-    data.add_id(do.id, anime_info.external_id, cfg.provider)
-    data.add_id(do.id, mal_id, "mal")
+    anime_id = data.insert(Tables.DATA.name, anime_info_json)
+
+    data.insert(Tables.IDS.name, {"id": anime_id, "external_id": anime_info.external_id, "source": cfg.provider})
+    data.insert(Tables.IDS.name, {"id": anime_id, "external_id": mal_id, "source": "mal"})
 
     await mal.list_add(mal_id, 0, MALListStatuses.PLAN_TO_WATCH)
 
@@ -288,7 +294,7 @@ async def watchlist_remove(id: int):
         cli.raise_err(ErrorTypes.INVALID_RESULT, e, anime.title)
         return 
 
-    data.remove(ctx[id])
+    data.remove_anime(ctx[id])
     await mal.list_remove(mal_id)
 
 @cli.on(["wl-drop"], {"id": lambda id: id in range(0, len(ctx))})
@@ -310,7 +316,7 @@ async def watchlist_drop(id: int):
     anime.continue_from = 1
     anime.highlighted = False
 
-    data.update(ctx[id])
+    data.update(Tables.DATA.name, anime.json(), {"id": anime.id})
     await mal.list_add(mal_id, anime.continue_from - 1, MALListStatuses.DROPPED)
 
 def select_list_and_show(type: Literal["watchlist", "completed", "dropped"], part: str | None, n: int | None):
@@ -344,7 +350,7 @@ def select_list_and_show(type: Literal["watchlist", "completed", "dropped"], par
         else:
             range_to_show = range(ctx_len - n, ctx_len)
 
-        print(display_ctx(ctx, lambda i, _: True if i in range_to_show else False))
+        render_ctx(ctx, lambda i, _: True if i in range_to_show else False)
 
 @cli.on(["wl"], {"part": lambda part: part in ("head", "tail", "all")})
 def watchlist(part: str | None = None, n: int | None = None) -> None:
@@ -365,7 +371,7 @@ def highlight(id: int):
 
     anime = data.watchlist[id]
     anime.highlighted = True
-    data.update(anime)
+    data.update(Tables.DATA.name, anime.json(), {"id": anime.id})
 
 
 @cli.on(validate={"id": lambda id: id in range(0, len(ctx))})
@@ -374,12 +380,13 @@ def dehighlight(id: int):
 
     anime = data.watchlist[id]
     anime.highlighted = False
-    data.update(anime)
+    data.update(Tables.DATA.name, anime.json(), {"id": anime.id})
 
 
 @cli.on(["d"], {"id": lambda id: id in range(0, len(ctx))})
 async def download(id: int, episode: int):
     """download an episode"""
+    anime = ctx[id]
 
     try:
         episode_sources = await get_episode(id=id, episode=episode)
@@ -388,7 +395,8 @@ async def download(id: int, episode: int):
             return
 
         async with Player(provider().extractor_headers) as player:
-            await player.download_file(episode_sources, os.getcwd())
+            video_title = f"{anime.title}. Episode {episode}"
+            await player.download_file(episode_sources, video_title, os.getcwd())
 
     except (InvalidResponse, InvalidStatusCode, SystemError) as e:
         return cli.raise_err(ErrorTypes.INVALID_RESULT, e)
@@ -407,8 +415,10 @@ async def play(id: int, episode: int):
             return
 
         async with Player(provider().extractor_headers) as player:
-            print(f"{anime.title}. Episode {episode}")
-            await player.play_file(episode_sources)
+            video_title = f"{anime.title}. Episode {episode}"
+            print(video_title)
+
+            await player.play_file(episode_sources, video_title)
 
     except (InvalidResponse, InvalidStatusCode, SystemError) as e:
         return cli.raise_err(ErrorTypes.INVALID_RESULT, e)
@@ -436,8 +446,10 @@ async def play_next(id: int):
 
     try:
         async with Player(provider().extractor_headers) as player:
-            print(f"{anime.title}. Episode {episode}")
-            await player.play_file(episode_sources)
+            video_title = f"{anime.title}. Episode {episode}"
+            print(video_title)
+
+            await player.play_file(episode_sources, video_title)
 
     except (InvalidResponse, InvalidStatusCode) as e:
         return cli.raise_err(ErrorTypes.INVALID_RESULT, e)
@@ -459,14 +471,11 @@ async def play_next(id: int):
 
                 await mal.list_add(mal_id, anime.episode_count, MALListStatuses.COMPLETED)
 
-            data.update(anime)
+            data.update(Tables.DATA.name, anime.json(), {"id": anime.id})
 
 
-
-@cli.on(["i"], {"id": lambda id: id in range(0, len(ctx))})
-async def info(id: int, keys: list[str] | None = None):
-    """show anime info"""
-    anime = ctx[id]
+def print_info(info: AnimeInfo, keys: list[str] | None) -> None:
+    term_width = os.get_terminal_size().columns
 
     def truncate_string(s: str, max_width: int, shift: int) -> str:
         new_str = ""
@@ -479,22 +488,9 @@ async def info(id: int, keys: list[str] | None = None):
 
         return new_str.strip()
 
-    if isinstance(anime, DataObject):
-        try:
-            mal_id = await check_mal_external_id(anime)
-            anime_info = await mal.get_anime(mal_id)
-
-        except ValueError as e:
-            return cli.raise_err(ErrorTypes.INVALID_RESULT, e)
-    else:
-        mal_id = await get_mal_id(anime)
-        if not mal_id:
-            return cli.raise_err(ErrorTypes.INVALID_RESULT, "failed to get mal_id")
-
-    anime_info = await mal.get_anime(mal_id)
-    anime_json = anime_info.json()
+    anime_json = info.json()
     keys = keys or list(anime_json.keys())
-    longest_key = len(max(keys, key=lambda i: len(i)))
+    longest_key = max(len(k) for k in keys)
 
     for key in keys:
         value = anime_json.get(key, -1)
@@ -504,7 +500,7 @@ async def info(id: int, keys: list[str] | None = None):
             continue
 
         if isinstance(value, str):
-            value = truncate_string(value, TERM_WIDTH() // 2, longest_key + 3)
+            value = truncate_string(value, term_width // 2, longest_key + 3)
 
         match key:
             case "genres":
@@ -522,10 +518,48 @@ async def info(id: int, keys: list[str] | None = None):
             case "continue_from":
                 continue
 
-        print(f"  \033[1m{key:<{longest_key}}\033[0m {value}")
+        print(f"  {key:<{longest_key}} {value}")
+        if key != keys[-1]:
+            print("")
 
 
-@cli.on()
+
+@cli.on(["i"], {"id": lambda id: id in range(0, len(ctx))})
+async def info(id: int, keys: list[str] | None = None):
+    """show anime info from MAL"""
+    anime = ctx[id]
+
+    if isinstance(anime, DataObject):
+        external_id = await check_provider_external_id(anime)
+
+    else:
+        external_id = anime.external_id
+
+    anime_info = await provider().get_anime(external_id)
+    print_info(anime_info, keys)
+
+@cli.on(["mi"], {"id": lambda id: id in range(0, len(ctx))})
+async def mal_info(id: int, keys: list[str] | None = None):
+    """show anime info from provider"""
+    anime = ctx[id]
+
+    if isinstance(anime, DataObject):
+        try:
+            mal_id = await check_mal_external_id(anime)
+            anime_info = await mal.get_anime(mal_id)
+
+        except ValueError as e:
+            return cli.raise_err(ErrorTypes.INVALID_RESULT, e)
+    else:
+        mal_id = await get_mal_id(anime)
+        if not mal_id:
+            return cli.raise_err(ErrorTypes.INVALID_RESULT, "failed to get mal_id")
+
+    anime_info = await mal.get_anime(mal_id)
+    print_info(anime_info, keys)
+
+
+@cli.on(["confs"])
 def config_set(key: str, value: str):
     """set config value"""
     global ctx
@@ -538,18 +572,18 @@ def config_set(key: str, value: str):
         cli.prompt = cfg.prompt.format(ctx.name)
 
 
-@cli.on(validate={"key": lambda key: getattr(cfg, key, None) is not None})
+@cli.on(["confg"], validate={"key": lambda key: getattr(cfg, key, None) is not None})
 def config_get(key: str):
     """get config value"""
     print(f"{key}:  {getattr(cfg, key)}")
 
 
-@cli.on()
+@cli.on(["conf"])
 def config():
-    """get all config info"""
+    """get config info"""
     annotations = cfg._get_annotations()
     for k, v in annotations.items():
-        print(f"  \033[1m{k:<9}\033[0m \033[3m{str(v):<17}\033[0m: {getattr(cfg, k)}")
+        print(f"  {k:<9} {v:<17}= {getattr(cfg, k)}")
 
 
 @cli.on(
@@ -570,7 +604,7 @@ def completed_reset(id: int):
         anime.finished_at = 0
         anime.added_at = int(time.time())
 
-    data.update(anime)
+    data.update(Tables.DATA.name, anime.json(), {"id": anime.id})
 
 @cli.on()
 async def refresh():
@@ -579,8 +613,6 @@ async def refresh():
 
 async def main_():
     global ctx
-
-    data.load()
     await mal.get_token()
 
     ctx = data.watchlist

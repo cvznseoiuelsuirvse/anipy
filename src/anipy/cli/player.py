@@ -4,6 +4,7 @@ import math
 import os
 import re
 import shutil
+import hashlib
 import requests
 import time
 import subprocess
@@ -198,11 +199,11 @@ class Player:
         await self.__connector.close()
         await self.__session.close()
 
-    def _play(self, video_file: str, sub_file: str | None) -> None:
+    def _play(self, video_title: str, video_file: str, sub_file: str | None) -> None:
         if not shutil.which(self.player_bin):
             raise SystemError(f"'{self.player_bin}' executable not found")
 
-        args = [self.player_bin]
+        args = [self.player_bin, f"--force-media-title={video_title}"]
 
         if sub_file:
             args.append(f"--sub-file={sub_file}")
@@ -215,12 +216,10 @@ class Player:
         args.append(video_file)
         proc = subprocess.run(args, capture_output=True)
         if proc.returncode != 0:
-            raise SystemError(proc.stderr.decode())
+            raise SystemError(args, proc.stderr.decode())
 
-    async def download_file(self, ep_sources: EpisodeSources, output_dir: str) -> None:
-        filename_base = gen_string(10)
-        filename_base = filename_base.replace("'", "\\'")
-
+    async def download_file(self, ep_sources: EpisodeSources, video_title: str, output_dir: str) -> None:
+        filename_base = hashlib.md5(video_title.encode()).hexdigest()
         master_url = ep_sources.source
 
         if not shutil.which("ffmpeg"):
@@ -231,8 +230,8 @@ class Player:
         await downloader.download(master_url, video_file)
 
 
-    async def play_file(self, ep_sources: EpisodeSources) -> None:
+    async def play_file(self, ep_sources: EpisodeSources, video_title: str) -> None:
         master_file = ep_sources.source
         sub_file = next((track["file"] for track in ep_sources.tracks if "default" in track), None)
 
-        self._play(master_file, sub_file)
+        self._play(video_title, master_file, sub_file)

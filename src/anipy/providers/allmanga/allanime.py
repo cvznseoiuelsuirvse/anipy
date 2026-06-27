@@ -1,7 +1,11 @@
+from typing import Callable, Awaitable
+
 from Crypto.Cipher import AES
 import hashlib
 import base64
 import json
+import aiohttp
+import re
 
 from ...core.types import EpisodeSources
 from ...core.exceptions import InvalidResponse
@@ -28,16 +32,35 @@ def decode_url(s: str) -> str:
     chars = [hex_to_char[b] for b in bytes.fromhex(s)]
     return ''.join(chars)
 
+
+async def get_req[T](url: str, *, 
+                     headers: dict | None = None, 
+                     resp_handler: Callable[[aiohttp.ClientResponse], Awaitable[T]]
+                     ) -> T:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers) as resp:
+            return await resp_handler(resp)
+
+
+async def resolve_mp4(url: str) -> str:
+    resp = await get_req(url, resp_handler=lambda r: r.text())
+    m = re.search(r"https:\/\/.+?mp4upload.com.*video\.mp4", resp)
+
+    if not m:
+        raise InvalidResponse("failed to resolve Mp4 source. video url not found")
+    
+    return m.group()
+    
+
 class AllAnime:
     headers = {
         "user-agent": "Mozilla/5.0 (X11; Linux x86_64; rv:139.0) Gecko/20100101 Firefox/139.0",
         "referer": "https://allanime.day/",
     }
 
-    @staticmethod
-    def exctract(data: dict) -> EpisodeSources:
+    @classmethod
+    async def exctract(cls, data: dict) -> EpisodeSources:
         tobeparsed = data['data']['tobeparsed']
-        # tobeparsed = data
 
         raw = base64.b64decode(tobeparsed)
         raw = raw[1:]
@@ -51,16 +74,33 @@ class AllAnime:
         json_data = json.loads(json_blob)
 
         episode = json_data['episode']
-        for src in episode['sourceUrls']:
-            if src['sourceName'] == 'Yt-mp4':
-                url = decode_url(src['sourceUrl'].lstrip('-'))
+        source_urls = episode['sourceUrls']
 
-                return EpisodeSources(
-                    source=url,
-                    tracks=[],
-                    intro=(0, 0),
-                    outro=(0, 0),
-                )
+        if not source_urls:
+            raise InvalidResponse("'sourceUrls' is empty")
 
+        source_urls = sorted(source_urls, key=lambda d: d['priority'], reverse=True)
 
-        raise InvalidResponse('Yt-mp4 source not found')
+        for src in source_urls:
+            url = src['sourceUrl']
+            name = src['sourceName']
+
+            match name:
+                case "Yt-mp4":
+                    url = decode_url(url.lstrip('-'))
+
+                case "Mp4":
+                    url = await resolve_mp4(url)
+                    cls.headers['referer'] = "https://www.mp4upload.com/"
+                     
+                case _:
+                    continue
+
+            return EpisodeSources(
+                source=url,
+                tracks=[],
+                intro=(0, 0),
+                outro=(0, 0),
+            )
+
+        raise InvalidResponse('source not found')

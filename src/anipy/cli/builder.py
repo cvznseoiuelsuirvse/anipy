@@ -80,35 +80,42 @@ def coerce_arg(raw: str, type_name: str) -> Any:
 
 
 class HelpFormatter:
-    def format(self, command: str, callback: _CommandHandler) -> str:
-        args_line = []
+    def _make_row(self, command: str, callback: _CommandHandler) -> tuple[str, str]:
+        aliases = getattr(callback, "__aliases__", [])
+        names = ", ".join(aliases + [command]) if aliases else command
+        args_parts = []
         for arg, annotation in inspect.get_annotations(callback).items():
             if arg != "return":
                 if isinstance(annotation, UnionType):
-                    inner = get_args(annotation)
-                    type_name = next(a.__name__ for a in inner if a is not type(None))
-                    args_line.append(f"[{arg} {type_name}]")
+                    args_parts.append(f"[{arg.upper()}]")
                 else:
-                    args_line.append(f"<{arg} {annotation.__name__}>")
+                    args_parts.append(f"<{arg.upper()}>")
+        left = f"{names} {' '.join(args_parts)}".rstrip()
+        return (left, callback.__doc__ or "")
 
-        aliases = getattr(callback, "__aliases__", [])
-        alias_prefix = f" {', '.join(aliases)} -> {command}\n" if aliases else f" {command}\n"
-        body = f"    {' '.join(args_line)} - {callback.__doc__}" if args_line else f"    {callback.__doc__}"
-        return alias_prefix + body
+    def _render_rows(self, rows: list[tuple[str, str]]) -> None:
+        width = max(len(r[0]) for r in rows)
+        for left, doc in rows:
+            print(f"  {left:<{width}}    {doc}")
 
     def print_one(self, name: str, registry: CommandRegistry) -> None:
         seen = []
+        rows = []
         for command, (callback, _, _) in registry.items():
             if command == name and callback not in seen:
                 seen.append(callback)
-                print(self.format(command, callback) + "\n")
+                rows.append(self._make_row(command, callback))
+        if rows:
+            self._render_rows(rows)
 
     def print_all(self, registry: CommandRegistry) -> None:
         seen = []
+        rows = []
         for command, (callback, _, _) in registry.items():
             if callback not in seen:
                 seen.append(callback)
-                print(self.format(command, callback) + "\n")
+                rows.append(self._make_row(command, callback))
+        self._render_rows(rows)
 
 
 class CLIApp:

@@ -1,13 +1,11 @@
 from enum import StrEnum
-from typing import Any, Literal
+from typing import Any, Iterable, Literal, Mapping
 from dataclasses import dataclass
-from typing import TypedDict
 import inspect
 
 type Serializable = str | int | list | dict
 type AiringStatus = Literal["finished", "airing"]
 type ItemStatus =   Literal["completed", "watchlist", "dropped"]
-
 
 class BaseObject:
     def __init__(self, obj: dict = {}) -> None:
@@ -92,26 +90,6 @@ class SearchObject(JsonSerializable):
 
 @dataclass
 class DataObject(JsonSerializable):
-    status:             ItemStatus
-
-    title:              str
-    other_title:        str
-
-    episode_count:      int
-    episode_duration:   int
-
-    type:               str
-    year:               int
-    airing_status:      AiringStatus
-
-    added_at:           int
-    finished_at:        int = 0
-
-    highlighted:        bool = False
-    continue_from:      int = 1
-    id:                 int = 0
-
-class DataObjectDict(TypedDict):
     id:                 int
     status:             ItemStatus
 
@@ -131,7 +109,6 @@ class DataObjectDict(TypedDict):
     highlighted:        bool
     continue_from:      int
 
-
 class SearchList(list[SearchObject]):
     name = "search"
     query: str
@@ -143,6 +120,9 @@ class SearchList(list[SearchObject]):
 
 class DataList(list[DataObject]):
     name = "data"
+    
+    def __init__(self, items: Iterable[Mapping]) -> None:
+        super().__init__(map(lambda o: DataObject(**o), items))
 
 
 class LockFileKeys(StrEnum):

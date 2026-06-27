@@ -39,11 +39,7 @@ def clean_html(s: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<.*?>|\n", "", s))
 
 class AllManga:
-    extractor_headers: dict = {
-            "user-agent": "Mozilla/5.0 (X11; Linux x86_64; rv:139.0) Gecko/20100101 Firefox/139.0",
-            "referer": "https://allanime.day/",
-        }
-
+    extractor_headers = AllAnime.headers
 
     @staticmethod
     @cache
@@ -68,7 +64,7 @@ class AllManga:
                 title=d["englishName"],
                 other_title=d["name"],
                 episode_count=d['availableEpisodes']['sub'],
-                episode_duration=d['episodeDuration'],
+                episode_duration=int(d['episodeDuration']),
                 type=d['type']
             ))
 
@@ -93,7 +89,7 @@ class AllManga:
             title=d["englishName"],
             other_title=d["name"],
             episode_count=d['availableEpisodes']['sub'],
-            episode_duration=d['episodeDuration'],
+            episode_duration=int(d['episodeDuration']),
             type=d['type'],
             description=clean_html(d['description']),
             year=d['season']['year'],
@@ -113,5 +109,7 @@ class AllManga:
         exts = json.dumps(Exts.EPISODE)
 
         resp = await make_request({"variables": variables, "extensions": exts}, lambda r: r.json())
+        if 'errors' in resp:
+            raise InvalidResponse()
 
-        return AllAnime.exctract(resp)
+        return await AllAnime.exctract(resp)
