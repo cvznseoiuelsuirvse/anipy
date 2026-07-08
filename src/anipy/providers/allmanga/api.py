@@ -7,13 +7,19 @@ from enum import EnumDict
 from ...core.exceptions import InvalidResponse, InvalidStatusCode
 from ...core.util import cache
 from ...core.types import SearchObject, AnimeInfo, EpisodeSources, AiringStatus
-from .allanime import AllAnime
+from .extractor import AllAnime
 
 
 class Exts(EnumDict):
     SEARCH = {"persistedQuery":{"version":1,"sha256Hash":"a24c500a1b765c68ae1d8dd85174931f661c71369c89b92b88b75a725afc471c"}}
     INFO = {"persistedQuery":{"version":1,"sha256Hash":"043448386c7a686bc2aabfbb6b80f6074e795d350df48015023b079527b0848a"}}
-    EPISODE = {"persistedQuery":{"version":1,"sha256Hash":"d405d0edd690624b66baba3068e0edc3ac90f1597d898a1ec8db4e5c43c00fec"}}
+    EPISODE = {
+        "persistedQuery":
+        {
+            "version":1,
+            "sha256Hash":"d405d0edd690624b66baba3068e0edc3ac90f1597d898a1ec8db4e5c43c00fec",
+        },
+    }
 
 BASE_URL = "https://api.allanime.day/api"
 HEADERS = {
@@ -37,6 +43,7 @@ async def make_request[T](params: dict, func: Callable[[aiohttp.ClientResponse],
 
 def clean_html(s: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<.*?>|\n", "", s))
+
 
 class AllManga:
     extractor_headers = AllAnime.headers
@@ -106,9 +113,12 @@ class AllManga:
             "episodeString": str(ep_num),
         })
 
-        exts = json.dumps(Exts.EPISODE)
+        exts: dict = Exts.EPISODE
+        exts['aaReq'] = await AllAnime.generate_aareq()
 
-        resp = await make_request({"variables": variables, "extensions": exts}, lambda r: r.json())
+        exts_string = json.dumps(exts)
+
+        resp = await make_request({"variables": variables, "extensions": exts_string}, lambda r: r.json())
         if 'errors' in resp:
             raise InvalidResponse()
 

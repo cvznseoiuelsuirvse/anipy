@@ -9,7 +9,7 @@ from ...core.exceptions import SelectorNotFound, InvalidResponse, InvalidStatusC
 from ...core.util import cache
 from ...core.types import SearchObject, AnimeInfo, EpisodeSources, AiringStatus
 
-from .megaup import Megaup
+from .extractor import Megaup
 
 BASE_URL = "https://animekai.to"
 HEADERS = {

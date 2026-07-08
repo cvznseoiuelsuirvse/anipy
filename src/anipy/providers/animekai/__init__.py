@@ -1,1 +1,2 @@
-from .animekai import AnimeKai
+from .api import AnimeKai
+from .extractor import Megaup

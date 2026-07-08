@@ -7,7 +7,7 @@ from enum import StrEnum
 from html import unescape
 from typing import overload, Literal, Awaitable, Callable, TypeVar
 
-from .megacloud import Servers, Megacloud
+from .extractor import Servers, Megacloud
 from ...core.util import cache
 from ...core.exceptions import InvalidResponse
 from ...core.types import SearchObject, AnimeInfo, EpisodeSources, AiringStatus
