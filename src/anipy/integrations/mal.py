@@ -279,15 +279,3 @@ class MAL:
             l.append(info_dict_to_cls(d['node']))
 
         return l
-
-if __name__ == "__main__":
-    async def main():
-        a = MAL()
-        await a.get_token()
-        res = await a.search("rent a girlfriend")
-        for l in res:
-            print(l)
-
-    asyncio.run(main())
-
-

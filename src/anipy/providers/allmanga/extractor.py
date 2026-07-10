@@ -31,7 +31,7 @@ async def get_request_text(url: str, headers: dict | None = None):
         async with session.get(url, headers=headers) as resp:
             return await resp.text()
 
-def get_crypto_key(mask: str, xor_key: str) -> bytes:
+def derive_key(mask: str, xor_key: str) -> bytes:
     mask_b = bytes.fromhex(mask)
     xor_key_b = base64.b64decode(xor_key)
 
@@ -77,20 +77,23 @@ class AllAnime:
     @classmethod
     async def _get_aa_params(cls, page: str) -> tuple[str, str]:
         app_pattern    = r'(https://cdn\.allanime\.day/all/mk/_app/immutable/entry/app\.\w+\.js)'
-        chunk_pattern  = r'(\.\./chunks/\w+\.js)'
+        chunk_pattern  = r'(\.\./chunks/[\w-]+\.js)'
         params_pattern = r'([a-f0-9]{64}).+?\w{2}=.+\"(\d{2})\"'
 
         m = re.search(app_pattern, page)
         if not m:
             raise InvalidFrontendPage("app .js file not found")
 
-        app_script = await get_request_text(m.group(1))
+        app_script_url = m.group(1)
+        # print(f"{app_script_url=}")
+        app_script = await get_request_text(app_script_url)
 
         m = re.search(chunk_pattern, app_script)
         if not m:
             raise InvalidScript("no chunks found")
 
         chunk_url = m.group(1).replace("..", "https://cdn.allanime.day/all/mk/_app/immutable/")
+        # print(f"{chunk_url=}")
         chunk = await get_request_text(chunk_url)
 
         m = re.search(params_pattern, chunk)
@@ -106,6 +109,7 @@ class AllAnime:
         front_end_page = await get_request_text(cls.__frontend)
 
         aa_crypto = cls._get_aa_crypto(front_end_page)
+
         mask, build_id = await cls._get_aa_params(front_end_page)
 
         ts = math.floor((time.time() * 1000) / 300_000) * 300_000
@@ -124,7 +128,7 @@ class AllAnime:
         nonce_raw = f"{epoch}:{build_id}:{query_hash}:{ts}".encode()
         nonce = hashlib.sha256(nonce_raw).digest()[:12]
 
-        cls.__crypto_key = get_crypto_key(mask, aa_crypto['partB'])
+        cls.__crypto_key = derive_key(mask, aa_crypto['partB'])
         json_blob_string = json.dumps(json_blob, separators=(',',':'))
 
         aes = AES.new(cls.__crypto_key, AES.MODE_GCM, nonce=nonce)

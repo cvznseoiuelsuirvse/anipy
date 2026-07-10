@@ -270,8 +270,6 @@ async def watchlist_add(id: int):
     anime_info_json["status"] = "watchlist"
     anime_info_json["added_at"] = int(time.time())
 
-    print(json.dumps(anime_info_json, indent=2))
-
     anime_id = data.insert(Tables.DATA.name, anime_info_json)
 
     data.insert(Tables.IDS.name, {"id": anime_id, "external_id": anime_info.external_id, "source": cfg.provider})

@@ -175,16 +175,3 @@ class AnimeKai:
     async def get_episodes(anime_id: str, ep_num: int) -> EpisodeSources:
         return await Megaup.extract(f"{BASE_URL}/watch/{anime_id}", ep_num, "sub")
 
-
-if __name__ == "__main__":
-    async def main():
-        # resp = await AnimeKai.search("rent a girl")
-        # for r in resp:
-        #     print(r)
-        info = await AnimeKai.get_anime("kanojo-okarishimasu-ywy9")
-        print(info)
-
-        sources = await AnimeKai.get_episodes("kanojo-okarishimasu-ywy9", 1)
-        print(sources)
-
-    asyncio.run(main())
