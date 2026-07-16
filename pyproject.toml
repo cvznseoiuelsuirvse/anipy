@@ -4,7 +4,7 @@ version = "0.4.0"
 description = "animeshka :P"
 requires-python = ">=3.12"
 dependencies = [
-    "Pycryptodome",
+    "pycryptodome",
     "aiohttp",
     "requests",
     "flask[async]>=3.1.1",

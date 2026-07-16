@@ -63,6 +63,7 @@ class AllAnime:
     }
 
     __frontend = "https://mkissa.to/"
+    __cdn = "https://cdn.mkissa.net"
     __crypto_key: bytes = b""
     
     @classmethod
@@ -76,9 +77,9 @@ class AllAnime:
 
     @classmethod
     async def _get_aa_params(cls, page: str) -> tuple[str, str]:
-        app_pattern    = r'(https://cdn\.allanime\.day/all/mk/_app/immutable/entry/app\.\w+\.js)'
+        app_pattern    = rf'({cls.__cdn}/all/mk/_app/immutable/entry/app\.[\w-]+\.js)'
         chunk_pattern  = r'(\.\./chunks/[\w-]+\.js)'
-        params_pattern = r'([a-f0-9]{64}).+?\w{2}=.+\"(\d{2})\"'
+        params_pattern = r'([a-f0-9]{64}).+?"(\d+)"'
 
         m = re.search(app_pattern, page)
         if not m:
@@ -88,11 +89,12 @@ class AllAnime:
         # print(f"{app_script_url=}")
         app_script = await get_request_text(app_script_url)
 
-        m = re.search(chunk_pattern, app_script)
+        m = re.findall(chunk_pattern, app_script)
         if not m:
             raise InvalidScript("no chunks found")
 
-        chunk_url = m.group(1).replace("..", "https://cdn.allanime.day/all/mk/_app/immutable/")
+        chunk = m[1]
+        chunk_url = chunk.replace("..", f"{cls.__cdn}/all/mk/_app/immutable/")
         # print(f"{chunk_url=}")
         chunk = await get_request_text(chunk_url)
 
@@ -101,7 +103,6 @@ class AllAnime:
             raise InvalidScript("no mask or build_id found")
 
         mask, build_id = m.groups()
-
         return mask, build_id
 
     @classmethod
@@ -109,7 +110,6 @@ class AllAnime:
         front_end_page = await get_request_text(cls.__frontend)
 
         aa_crypto = cls._get_aa_crypto(front_end_page)
-
         mask, build_id = await cls._get_aa_params(front_end_page)
 
         ts = math.floor((time.time() * 1000) / 300_000) * 300_000
@@ -150,11 +150,21 @@ class AllAnime:
         aes = AES.new(cls.__crypto_key, AES.MODE_GCM, nonce=nonce)
         plain = aes.decrypt(ciphertext)
 
-        json_blob = plain.decode(encoding='utf-8')
+        try:
+            json_blob = plain.decode(encoding='utf-8')
+
+        except UnicodeDecodeError:
+            if cls.__crypto_key.startswith(b"\xa2\x54\xaa\x27"):
+                raise 
+
+            cls.__crypto_key = hashlib.sha256(b"Xot36i3lK3:v1").digest()
+            return await cls.exctract(data)
+
         json_data = json.loads(json_blob)
 
         episode = json_data['episode']
         source_urls = episode['sourceUrls']
+        # print(json.dumps(json_data, indent=2))
 
         if not source_urls:
             raise InvalidResponse("'sourceUrls' is empty")
@@ -166,8 +176,9 @@ class AllAnime:
             name = src['sourceName']
 
             match name:
-                case "Yt-mp4":
-                    url = decode_url(url.lstrip('-'))
+                case "Yt-mp4" | "S-mp4":
+                    if url.startswith("--"):
+                        url = decode_url(url.lstrip('-'))
 
                 case "Mp4":
                     url = await resolve_mp4(url)

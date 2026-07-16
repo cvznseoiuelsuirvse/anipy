@@ -24,8 +24,8 @@ class Exts(EnumDict):
 BASE_URL = "https://api.allanime.day/api"
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:147.0) Gecko/20100101 Firefox/147.0",
-    "Origin": "https://allmanga.to",
-    "Referer": "https://allmanga.to/",
+    "Origin": "https://youtu-chan.com",
+    "Referer": "https://youtu-chan.com/",
 }
 
 async def make_request[T](params: dict, func: Callable[[aiohttp.ClientResponse], Awaitable[T]]) -> T:
