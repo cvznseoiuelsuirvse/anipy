@@ -1,7 +1,10 @@
+import asyncio
+from typing import Awaitable, Callable
+
 from Crypto.Cipher import AES
+import hmac
 import hashlib
 import time
-import math
 import base64
 import json
 import aiohttp
@@ -26,29 +29,65 @@ HEX_TO_CHAR = {
     0x12: "*", 0x13: "+", 0x14: ",", 0x03: ";", 0x05: "=", 0x1D: "%"
 }
 
-async def get_request_text(url: str, headers: dict | None = None):
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers) as resp:
-            return await resp.text()
+return_text = lambda r: r.text()
+return_json = lambda r: r.json()
 
-def derive_key(mask: str, xor_key: str) -> bytes:
-    mask_b = bytes.fromhex(mask)
+async def request_get[T](
+        url: str, *, headers: dict | None = None, params: dict | None = None,
+        func: Callable[[aiohttp.ClientResponse], Awaitable[T]]) -> T:
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers=headers, params=params) as resp:
+            return await func(resp)
+
+def sign(key: bytes, msg: bytes) -> bytes:
+    return hmac.new(key, msg, hashlib.sha256).digest()
+
+def derive_key(mask: bytes, xor_key: str) -> bytes:
     xor_key_b = base64.b64decode(xor_key)
 
     key = b""
     
-    for a, b in zip(xor_key_b, mask_b):
+    for a, b in zip(xor_key_b, mask):
         val = a ^ b
         key += val.to_bytes(1)
 
     return key
+
+def get_build_id_mask(build_id: str) -> bytes:
+    ret = b""
+    for i in range(32):
+        ch = build_id[i % len(build_id)]
+        mask = 255 & (i * 17 + 31)
+        ret += int.to_bytes(ord(ch) ^ mask)
+
+    return ret
+
+def get_sign_key(build_id: str) -> bytes:
+    build_id_mask = get_build_id_mask(build_id)
+
+    # hopefully it stays the same
+    hmac_mask = b'\xd7\x47\x75\xdf\xfd\xb5\xde\x12\x5d\xd4\xc0\xe8\x56\x80\x41\x2a\x29\x10\x94\x4f\xd9\x59\x87\x5a\x02\x3d\xc0\x48\x22\x03\x32\x7c'
+
+    sign_key = b""
+    for i, (b, h) in enumerate(zip(build_id_mask, hmac_mask)):
+        v1 = b ^ h
+        v2 = 255 & ((i // 8) * 41 + (i % 8) * 7)
+        sign_key += int.to_bytes(v1 ^ v2)
+
+
+    return sign_key
+
+def derive_nonce(*args) -> bytes:
+    encoded = ":".join(map(str, args)).encode()
+    return hashlib.sha256(encoded).digest()[:12]
+
 
 def decode_url(s: str) -> str:
     chars = [HEX_TO_CHAR[b] for b in bytes.fromhex(s)]
     return ''.join(chars)
 
 async def resolve_mp4(url: str) -> str:
-    resp = await get_request_text(url)
+    resp = await request_get(url, func=return_text)
     m = re.search(r"https:\/\/.+?mp4upload.com.*video\.mp4", resp)
 
     if not m:
@@ -62,80 +101,108 @@ class AllAnime:
         "referer": "https://allanime.day/",
     }
 
-    __frontend = "https://mkissa.to/"
+    __frontend = "https://youtu-chan.com"
     __cdn = "https://cdn.mkissa.net"
+
     __crypto_key: bytes = b""
     
     @classmethod
-    def _get_aa_crypto(cls, page: str) -> dict:
-        pattern  = r'window\.__aaCrypto=({[^}]+})'
-        m = re.search(pattern, page)
-        if not m:
-            raise InvalidFrontendPage("__aaCrypto object not found")
+    async def _get_aa_crypto(cls, sign_key: bytes, build_id: str, epoch: int, content_lane: str, host: str) -> dict:
+        pre_aa_boot = sign(sign_key, f'aa-boot:{build_id}'.encode())
 
-        return json.loads(m.group(1))
+        if host == "mkissa.to":
+            domain = "mkissa"
+        else:
+            domain = "mirror"
+
+        aa_boot = sign(pre_aa_boot, f'{build_id}:{domain}:{host}:{epoch}:{content_lane}'.encode())
+
+        url = "https://api.mkissa.net/client-crypto/v1/bootstrap"
+        headers = {
+            "Origin": f"https://{host}",
+            "Referer": f"https://{host}/",
+            "x-aa-boot": aa_boot.hex(),
+            "x-build-id": build_id,
+        }
+
+        params = {
+            "buildId": build_id,
+            "k": content_lane,
+        }
+
+        resp = await request_get(url, headers=headers, params=params, func=return_json)
+        return resp
 
     @classmethod
     async def _get_aa_params(cls, page: str) -> tuple[str, str]:
         app_pattern    = rf'({cls.__cdn}/all/mk/_app/immutable/entry/app\.[\w-]+\.js)'
         chunk_pattern  = r'(\.\./chunks/[\w-]+\.js)'
-        params_pattern = r'([a-f0-9]{64}).+?"(\d+)"'
+        params_pattern = r'"(\d+)":""'
 
         m = re.search(app_pattern, page)
         if not m:
             raise InvalidFrontendPage("app .js file not found")
 
         app_script_url = m.group(1)
-        # print(f"{app_script_url=}")
-        app_script = await get_request_text(app_script_url)
+        app_script = await request_get(app_script_url, func=return_text)
 
         m = re.findall(chunk_pattern, app_script)
         if not m:
             raise InvalidScript("no chunks found")
 
-        chunk = m[1]
-        chunk_url = chunk.replace("..", f"{cls.__cdn}/all/mk/_app/immutable/")
-        # print(f"{chunk_url=}")
-        chunk = await get_request_text(chunk_url)
+        chunk_urls = [chunk.replace("..", f"{cls.__cdn}/all/mk/_app/immutable/") for chunk in m[:2]]
+        tasks = [request_get(u, func=return_text) for u in chunk_urls]
+        done = await asyncio.gather(*tasks)
 
-        m = re.search(params_pattern, chunk)
-        if not m:
-            raise InvalidScript("no mask or build_id found")
+        for text in done:
+            m = re.search(params_pattern, text)
+            if m: 
+                break
+        else:
+            raise InvalidScript("no build_id found")
 
-        mask, build_id = m.groups()
-        return mask, build_id
+        build_id = m.group(1)
+        return "k7", build_id
 
     @classmethod
-    async def generate_aareq(cls) -> str:
-        front_end_page = await get_request_text(cls.__frontend)
+    async def generate_aareq(cls, qh: str, host: str) -> dict:
+        headers = {
+            "Origin": f"https://mkissa.to", 
+            "Referer": f"https://mkissa.to/"
+        }
 
-        aa_crypto = cls._get_aa_crypto(front_end_page)
-        mask, build_id = await cls._get_aa_params(front_end_page)
+        front_end_page = await request_get(
+            cls.__frontend, 
+            headers=headers,
+            func=return_text
+        )
 
-        ts = math.floor((time.time() * 1000) / 300_000) * 300_000
-        epoch = aa_crypto['epoch']
+        epoch = int(time.time()) // 259200 - 1
+        content_lane, build_id = await cls._get_aa_params(front_end_page)
 
-        query_hash =  "d405d0edd690624b66baba3068e0edc3ac90f1597d898a1ec8db4e5c43c00fec"
+        sign_key = get_sign_key(build_id)
+        aa_crypto = await cls._get_aa_crypto(sign_key, build_id, epoch, content_lane, host)
 
+        ts = int(time.time() * 1000) // 300_000 * 300_000
         json_blob = {
             "v": 1,
             "ts": ts,
             "epoch": epoch,
             "buildId": build_id,
-            "qh": query_hash,
+            "qh": qh,
+            "k": content_lane,
         }
 
-        nonce_raw = f"{epoch}:{build_id}:{query_hash}:{ts}".encode()
-        nonce = hashlib.sha256(nonce_raw).digest()[:12]
-
-        cls.__crypto_key = derive_key(mask, aa_crypto['partB'])
+        nonce = derive_nonce(epoch, build_id, qh, ts, content_lane)
+        cls.__crypto_key = derive_key(sign_key, aa_crypto['partB'])
         json_blob_string = json.dumps(json_blob, separators=(',',':'))
 
         aes = AES.new(cls.__crypto_key, AES.MODE_GCM, nonce=nonce)
         cipher, tag = aes.encrypt_and_digest(json_blob_string.encode())
 
         aaReq_bytes = b"\x01" + nonce + cipher + tag
-        return base64.b64encode(aaReq_bytes).decode()
+
+        return {"aa_req": base64.b64encode(aaReq_bytes).decode(), "build_id": build_id}
 
 
     @classmethod
@@ -164,7 +231,6 @@ class AllAnime:
 
         episode = json_data['episode']
         source_urls = episode['sourceUrls']
-        # print(json.dumps(json_data, indent=2))
 
         if not source_urls:
             raise InvalidResponse("'sourceUrls' is empty")

@@ -72,11 +72,6 @@ def render_ctx(ctx: DataList | SearchList, validate: Callable[[int, DataObject],
                 f"> {i:<{longest_index}}  {anime.title}  {anime.continue_from}/{anime.episode_count}"
               )
 
-        elif anime.finished_at > 1:
-            dt = datetime.datetime.fromtimestamp(anime.finished_at)
-            fmt = dt.strftime("%d-%b-%Y").lower()
-            print(f"  {i:<{longest_index}}  {fmt}  {anime.title:<{w}}")
-
         else:
             print(f"  {i:<{longest_index}}  {anime.title}")
 
@@ -309,13 +304,15 @@ async def watchlist_drop(id: int):
         cli.raise_err(ErrorTypes.INVALID_RESULT, e, anime.title)
         return 
 
+    episoded_seen = anime.continue_from - 1
+
     anime.status = "dropped"
     anime.finished_at = int(time.time())
     anime.continue_from = 1
     anime.highlighted = False
 
     data.update(Tables.DATA.name, anime.json(), {"id": anime.id})
-    await mal.list_add(mal_id, anime.continue_from - 1, MALListStatuses.DROPPED)
+    await mal.list_add(mal_id, episoded_seen, MALListStatuses.DROPPED)
 
 def select_list_and_show(type: Literal["watchlist", "completed", "dropped"], part: str | None, n: int | None):
     global ctx
@@ -358,7 +355,7 @@ def watchlist(part: str | None = None, n: int | None = None) -> None:
 def completed(part: str | None = None, n: int | None = None) -> None:
     select_list_and_show("completed", part, n)
 
-@cli.on(["drop"], {"part": lambda part: part in ("head", "tail", "all")})
+@cli.on([], {"part": lambda part: part in ("head", "tail", "all")})
 def dropped(part: str | None = None, n: int | None = None) -> None:
     select_list_and_show("dropped", part, n)
 
@@ -397,6 +394,7 @@ async def download(id: int, episode: int):
             await player.download_file(episode_sources, video_title, os.getcwd())
 
     except (InvalidResponse, InvalidStatusCode, SystemError) as e:
+        print(e)
         return cli.raise_err(ErrorTypes.INVALID_RESULT, e)
 
 
@@ -504,15 +502,6 @@ def print_info(info: AnimeInfo, keys: list[str] | None) -> None:
             case "genres":
                 value = ", ".join(value) if isinstance(value, list) else value.replace(",", ", ")
 
-            case "added_at" | "finished_at":
-                assert isinstance(value, int)
-                if value > 1:
-                    ts = time.strftime("%b %d %H:%M %Y", time.localtime(value))
-                    value = ts
-
-                else:
-                    continue
-
             case "continue_from":
                 continue
 
@@ -535,6 +524,23 @@ async def info(id: int, keys: list[str] | None = None):
 
     anime_info = await provider().get_anime(external_id)
     print_info(anime_info, keys)
+
+
+@cli.on(validate={"id": lambda id: id in range(0, len(ctx))})
+def dates(id: int):
+    if isinstance(ctx, SearchList):
+        return cli.raise_err(ErrorTypes.INVALID_CONTEXT, "can't get date attributes from SeachList objects, only DataList is allowed")
+
+    anime = ctx[id]
+    
+    if anime.added_at > 0:
+        added_at = time.strftime("%b %d %H:%M %Y", time.localtime(anime.added_at))
+        print(f"Added at:    {added_at}")
+
+    if anime.finished_at > 0:
+        finished_at = time.strftime("%b %d %H:%M %Y", time.localtime(anime.finished_at))
+        print(f"Finished at: {finished_at}")
+
 
 @cli.on(["mi"], {"id": lambda id: id in range(0, len(ctx))})
 async def mal_info(id: int, keys: list[str] | None = None):

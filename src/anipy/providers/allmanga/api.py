@@ -9,28 +9,31 @@ from ...core.util import cache
 from ...core.types import SearchObject, AnimeInfo, EpisodeSources, AiringStatus
 from .extractor import AllAnime
 
+BASE_URL = "https://api.mkissa.net/api"
+HOST = "youtu-chan.com"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:147.0) Gecko/20100101 Firefox/147.0",
+    "Origin": f"https://{HOST}",
+    "Referer": f"https://{HOST}/",
+}
 
 class Exts(EnumDict):
     SEARCH = {"persistedQuery":{"version":1,"sha256Hash":"a24c500a1b765c68ae1d8dd85174931f661c71369c89b92b88b75a725afc471c"}}
     INFO = {"persistedQuery":{"version":1,"sha256Hash":"043448386c7a686bc2aabfbb6b80f6074e795d350df48015023b079527b0848a"}}
     EPISODE = {
-        "persistedQuery":
-        {
+        "persistedQuery": {
             "version":1,
-            "sha256Hash":"d405d0edd690624b66baba3068e0edc3ac90f1597d898a1ec8db4e5c43c00fec",
+            "sha256Hash":"f4662f4b7510b26795dd53ef824a0bf1740fbbc5d1273fab18222ac831bca8d0",
         },
+        "k": "k7",
     }
 
-BASE_URL = "https://api.allanime.day/api"
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:147.0) Gecko/20100101 Firefox/147.0",
-    "Origin": "https://youtu-chan.com",
-    "Referer": "https://youtu-chan.com/",
-}
 
-async def make_request[T](params: dict, func: Callable[[aiohttp.ClientResponse], Awaitable[T]]) -> T:
+async def make_request[T](params: dict, *, headers: dict = {}, func: Callable[[aiohttp.ClientResponse], Awaitable[T]]) -> T:
+    headers |= HEADERS
+
     async with aiohttp.ClientSession() as client:
-        async with client.get(BASE_URL, headers=HEADERS, params=params) as resp:
+        async with client.get(BASE_URL, headers=headers, params=params) as resp:
             if resp.status != 200:
                 raise InvalidStatusCode(resp.status, resp.url)
 
@@ -60,7 +63,7 @@ class AllManga:
         })
         exts = json.dumps(Exts.SEARCH)
 
-        resp = await make_request({"variables": variables, "extensions": exts}, lambda r: r.json())
+        resp = await make_request({"variables": variables, "extensions": exts}, func=lambda r: r.json())
 
         l = []
         data = resp['data']['shows']['edges']
@@ -85,7 +88,7 @@ class AllManga:
         })
         exts = json.dumps(Exts.INFO)
 
-        resp = await make_request({"variables": variables, "extensions": exts}, lambda r: r.json())
+        resp = await make_request({"variables": variables, "extensions": exts}, func=lambda r: r.json())
 
         d = resp['data']['show']
         airing_status: AiringStatus = 'airing' if d['status'] == "Releasing" else 'finished'
@@ -114,12 +117,21 @@ class AllManga:
         })
 
         exts: dict = Exts.EPISODE
-        exts['aaReq'] = await AllAnime.generate_aareq()
 
+        aa_req = await AllAnime.generate_aareq(exts['persistedQuery']['sha256Hash'], HOST)
+        exts['aaReq'] = aa_req['aa_req']
         exts_string = json.dumps(exts)
 
-        resp = await make_request({"variables": variables, "extensions": exts_string}, lambda r: r.json())
+        headers = {
+            "x-build-id": aa_req["build_id"]
+        }
+
+        resp = await make_request(
+            {"variables": variables, "extensions": exts_string},
+            headers=headers, func=lambda r: r.json()
+        )
+
         if 'errors' in resp:
-            raise InvalidResponse()
+            raise InvalidResponse(resp['errors'])
 
         return await AllAnime.exctract(resp)
