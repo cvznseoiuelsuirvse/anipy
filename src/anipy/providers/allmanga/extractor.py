@@ -125,20 +125,24 @@ class AllAnimeCrypto:
         if not local_funcs:
             raise InvalidScript("no local index functions found")
 
-        for local_name, global_name, local_value in local_funcs:
-            p_global = r"function " + global_name + r"\(\w,\w\){return \w=\w-([\(\)\d\-+*\/]+)," + array_func + r"\(\)"
+        local_func_arg = 0
+        for lname, arg, gname, lvalue_var, lvalue_num in local_funcs:
+            local_func_arg = 0 if arg == lvalue_var else 1
+
+            p_global = r"function " + gname + r"\(\w,\w\){return \w=\w-([\(\)\d\-+*\/]+)," + array_func + r"\(\)"
             m = re.search(p_global, script)
             if not m:
-                raise InvalidScript(f"global index function {global_name} not found")
+                raise Exception(f"global index function {gname} not found")
 
             gv = eval(m.group(1))
-            lv = eval(local_value)
-            index_funcs[global_name] = lambda v, _gv=gv: v - _gv
-            sub_index_funcs[local_name] = lambda v, _lv=lv, _gn=global_name: index_funcs[_gn](v - _lv)
+            lv = eval(lvalue_num)
+
+            index_funcs[gname] = lambda v, _gv=gv: v - _gv
+            sub_index_funcs[lname] = lambda v, _lv=lv, _gn=gname: index_funcs[_gn](v - _lv)
 
         indexes = [
-            sub_index_funcs[fn](int(val))
-            for fn, val in re.findall(r"parseInt\((\w)\([-\d]+,([-\d]+)", shuffle_func)
+            sub_index_funcs[fn](int((val1, val2)[local_func_arg]))
+            for fn, val1, val2 in re.findall(r"parseInt\((\w)\(([-\d]+),([-\d]+)", shuffle_func)
         ]
 
         while None in [parse_int(all_items[i]) for i in indexes]:
