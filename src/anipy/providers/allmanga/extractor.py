@@ -60,7 +60,7 @@ async def resolve_mp4(url: str) -> str:
 def current_epoch() -> int:
     now = int(time.time())
 
-    EPOCH = 259200
+    EPOCH = 604800
     GRACE = 86400
 
     epoch = now // EPOCH
@@ -118,17 +118,14 @@ class AllAnimeCrypto:
 
         shuffle_func = m.group(1)
 
-        sub_index_funcs: dict[str, Callable[[int], int]] = {}
+        sub_index_funcs: dict[str, Callable[[tuple[int, ...]], int]] = {}
         index_funcs: dict[str, Callable[[int], int]] = {}
 
-        local_funcs = re.findall(r"function (\w)\(\w,\w\){return (\w{2})\(\w-([\d\- ]+)\)}", shuffle_func)
+        local_funcs = re.findall(r"function (\w)\((\w),\w\){return (\w{2})\((\w)-([\d\- ]+)\)}", shuffle_func)
         if not local_funcs:
             raise InvalidScript("no local index functions found")
 
-        local_func_arg = 0
         for lname, arg, gname, lvalue_var, lvalue_num in local_funcs:
-            local_func_arg = 0 if arg == lvalue_var else 1
-
             p_global = r"function " + gname + r"\(\w,\w\){return \w=\w-([\(\)\d\-+*\/]+)," + array_func + r"\(\)"
             m = re.search(p_global, script)
             if not m:
@@ -138,23 +135,23 @@ class AllAnimeCrypto:
             lv = eval(lvalue_num)
 
             index_funcs[gname] = lambda v, _gv=gv: v - _gv
-            sub_index_funcs[lname] = lambda v, _lv=lv, _gn=gname: index_funcs[_gn](v - _lv)
+            sub_index_funcs[lname] = lambda v, _lv=lv, _gn=gname, _i=int(arg != lvalue_var): index_funcs[_gn](v[_i] - _lv)
 
         indexes = [
-            sub_index_funcs[fn](int((val1, val2)[local_func_arg]))
+            sub_index_funcs[fn](tuple(map(int, (val1, val2))))
             for fn, val1, val2 in re.findall(r"parseInt\((\w)\(([-\d]+),([-\d]+)", shuffle_func)
         ]
 
         while None in [parse_int(all_items[i]) for i in indexes]:
             all_items.append(all_items.pop(0))
 
-        m = re.search(r"\w{2}=\[(\w{2}\([^\]]+)", script)
+        m = re.search(r"\w{2}=\[([\w\$]{2}\([^\]]+)", script)
         if not m:
             raise InvalidScript("mask array not found")
 
         mask_indexes = []
-        for local_name, value in re.findall(r"([a-zA-Z]{2}).+?([\d-]+)\)", m.group(1)):
-            p_sub = r"function " + local_name + r"\(\w,\w\){return (\w{2})\(\w-([\d\- ]+)\)}"
+        for local_name, value in re.findall(r"([\w\$]{2}).+?([\de-]+)\)", m.group(1)):
+            p_sub = r"function " + local_name.replace("$", r'\$') + r"\(\w,\w\){return (\w{2})\(\w-([\d\- ]+)\)}"
             m_ = re.search(p_sub, script)
             if not m_:
                 raise InvalidScript(f"no {local_name} sub index function found")
@@ -163,7 +160,7 @@ class AllAnimeCrypto:
             if global_name not in index_funcs:
                 raise InvalidScript(f"unknown global index function {global_name}")
 
-            mask_indexes.append(index_funcs[global_name](int(value) - int(m_.group(2))))
+            mask_indexes.append(index_funcs[global_name](int(float(value) - int(m_.group(2)))))
 
         mask = b""
         for i in range(0, len(mask_indexes), 2):
@@ -235,10 +232,7 @@ class AllAnimeCrypto:
             domain = "mirror"
 
         aa_boot_key = cls.sign(f'aa-boot:{build_id}', sign_key)
-        print(f"{list(aa_boot_key)=}")
-
         aa_boot = cls.sign(f'{build_id}:{domain}:{host}:{epoch}:{content_lane}', aa_boot_key)
-        print(f"{list(aa_boot)=}")
 
         url = "https://api.mkissa.net/client-crypto/v1/bootstrap"
         headers = {
@@ -268,16 +262,10 @@ class AllAnime:
     @classmethod
     async def generate_aareq(cls, qh: str, host: str) -> dict:
         epoch = current_epoch()
-        print(f"{epoch=}")
-
         content_lane, build_id, sign_key_mask = await AllAnimeCrypto.get_aa_params()
-        print(f"{content_lane=} {build_id=} {list(sign_key_mask)=}")
 
         sign_key = AllAnimeCrypto.get_sign_key(build_id, sign_key_mask)
-        print(f"{list(sign_key)=}")
-
         aa_crypto = await AllAnimeCrypto.get_aa_crypto(sign_key, build_id, epoch, content_lane, host)
-        print(f"{aa_crypto=}")
 
         ts = int(time.time() * 1000) // 300_000 * 300_000
         json_blob = {

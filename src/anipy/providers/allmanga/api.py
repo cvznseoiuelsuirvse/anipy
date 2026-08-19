@@ -23,7 +23,7 @@ class Exts(EnumDict):
     EPISODE = {
         "persistedQuery": {
             "version":1,
-            "sha256Hash":"f4662f4b7510b26795dd53ef824a0bf1740fbbc5d1273fab18222ac831bca8d0",
+            "sha256Hash":"ca735f1436927eaf7abb05d1589bb93c43cf606d87eecc2030357c1aad8fb455",
         },
         "k": "k7",
     }
