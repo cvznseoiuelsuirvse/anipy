@@ -23,7 +23,7 @@ class Exts(EnumDict):
     EPISODE = {
         "persistedQuery": {
             "version":1,
-            "sha256Hash":"ca735f1436927eaf7abb05d1589bb93c43cf606d87eecc2030357c1aad8fb455",
+            "sha256Hash":"1c836a5028e04275c6bc618aa4d1f0ea2290a73bc056ba6a8b93fe72ef42fd04",
         },
         "k": "k7",
     }
@@ -118,12 +118,12 @@ class AllManga:
 
         exts: dict = Exts.EPISODE
 
-        aa_req = await AllAnime.generate_aareq(exts['persistedQuery']['sha256Hash'], HOST)
-        exts['aaReq'] = aa_req['aa_req']
+        aa_req, build_id = await AllAnime.generate_aareq(exts['persistedQuery']['sha256Hash'], HOST)
+        exts['aaReq'] = aa_req
         exts_string = json.dumps(exts)
 
         headers = {
-            "x-build-id": aa_req["build_id"]
+            "x-build-id": build_id
         }
 
         resp = await make_request(

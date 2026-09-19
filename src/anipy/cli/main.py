@@ -147,6 +147,8 @@ async def check_provider_external_id(anime: DataObject) -> str:
         return id['external_id']
 
     resp = await provider().search(anime.other_title)
+    if not resp:
+        resp = await provider().search(anime.title)
 
     for a in resp:
         if (a.title and a.title.lower() == anime.title.lower()) or \

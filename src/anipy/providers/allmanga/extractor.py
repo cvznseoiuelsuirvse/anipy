@@ -11,6 +11,33 @@ import re
 
 from ...core.types import EpisodeSources
 from ...core.exceptions import InvalidFrontendPage, InvalidScript, InvalidResponse
+ 
+CONTENT_LANE = "k7"
+
+RE_INDEX           = r"-?(?:[\d ]+|(\w)\._(0x[a-f0-9]{1,6}))"
+RE_INDEX_FUNC_BODY = r"\((\w),\w\){return ([\w$]{2})\((\w)- ?(" + RE_INDEX + r")\)}"
+RE_INDEX_FUNC_BODY2 = r"\((\w),\w\){return ([\w$]{2})\((\w)- ?((?:-?(?:[\d ]+|(\w)\._(0x[a-f0-9]{1,6}))|{_0x[a-f0-9]{1,6}:(\d+)}\._0x[a-f0-9]{1,6}))\)}"
+
+RE_PARSE_INT              = r"^(\d+)[a-zA-z]+$"
+RE_GLOBAL_INDEX_FUNC_CALL = r"([\w\$]{2})\((?:[\de\-]+,)?([\de\-]+)\)"
+RE_ARRAY_BODY             = r"([\w\$]{2}\([^\]]+)"
+RE_NUM_MAP_ENTRY          = r"_(0x[a-f0-9]{1,6}):(\d+)"
+RE_NUM_MAP                = r"(\w)={((?:" + RE_NUM_MAP_ENTRY + r",?)+)}"
+
+RE_QUOTED_STRING          = r'(?:"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\')'
+RE_ARRAY_FUNC             = r'function (\w{2})\(\){const\s+\w+=\[((?=[^\]]*"epo")[^\]]*)\]'
+RE_LOCAL_INDEX_FUNC       = r"function (\w)" + RE_INDEX_FUNC_BODY
+RE_SHUFFLE_CHECK          = r"parseInt\((\w)\((" + RE_INDEX + "),(" + RE_INDEX + ")"
+RE_MASK_ARRAY             = r"\w{2}=\[((?:(?:" + RE_GLOBAL_INDEX_FUNC_CALL + r"\+?){4},?){4})"
+RE_BUILD_ID               = r"const [\w$]{2}=" + RE_GLOBAL_INDEX_FUNC_CALL + r",[\w$]{2}"
+RE_CHUNK_URL              = r"(\.\./chunks/[\w-]+\.js)"
+RE_BOOT_CFG               = r'\{v:\d+,saltMul:(\d+),saltAdd:(\d+),fragMul:(\d+),fragAdd:(\d+),bootPrefix:((?:([\w\$]{2})\((?:[\de\-]+,)?([\de\-]+)\)\+?)+(?:"[\w:]+")?),join:"([^"]+)",parts:\[([\w\$]{2}\([^\]]+)\],omitEmptyLane:([^,]+),envXor:(\d+)'
+
+RE_SHUFFLE_FUNC_PREFIX    = r"}\(function\(\w,\w\){([\w\s={:,};\(\)-\.\/!$]+)"
+RE_SHUFFLE_FUNC_SUFFIX    = r",([\d\+\-\*\/ ]+)\)"
+RE_GLOBAL_FUNC_INFIX      = r"\(\w,\w\){return \w=\w-([\(\)\d\-+*\/]+),"
+RE_GLOBAL_FUNC_SUFFIX     = r"\(\)"
+RE_SUB_INDEX_FUNC_PREFIX  = r"function "
 
 HEX_TO_CHAR = {
     0x79: "A", 0x7A: "B", 0x7B: "C", 0x7C: "D", 0x7D: "E", 0x7E: "F", 0x7F: "G",
@@ -31,11 +58,19 @@ HEX_TO_CHAR = {
 return_text = lambda r: r.text()
 return_json = lambda r: r.json()
 
+def _make_global_index_func(offset: int) -> Callable[[int], int]:
+    return lambda v: v - offset
+
+def _make_sub_index_func(local_offset: int, arg_index: int, global_func: Callable[[int], int]) -> Callable[[tuple], int]:
+    return lambda pair: global_func(pair[arg_index] - local_offset)
+
 async def request_get[T](
-        url: str, *, headers: dict | None = None, params: dict | None = None,
+    url: str, *, headers: dict | None = None, resp_headers: dict | None = None, params: dict | None = None,
         func: Callable[[aiohttp.ClientResponse], Awaitable[T]]) -> T:
     async with aiohttp.ClientSession() as session:
         async with session.get(url, headers=headers, params=params) as resp:
+            if resp_headers is not None:
+                resp_headers |= resp.headers
             return await func(resp)
             
 def parse_int(v: str) -> int | None:
@@ -67,9 +102,41 @@ def current_epoch() -> int:
     return epoch - (epoch > 0 and now % EPOCH < GRACE)
 
 
+class AllAnimeCryptoConfig:
+    lane:        str
+    epoch:       int
+    build_id:    str
+    mask:        bytes
+    salt:        tuple[int, int]
+    frag:        tuple[int, int]
+    boot_prefix: str
+    join:        str
+    parts:       list[str]
+
+    def __str__(self) -> str:
+        s = f"""
+lane={self.lane}  epoch={self.epoch} build_id={self.build_id}
+salt={self.salt}  frag={self.frag}
+boot_prefix={self.boot_prefix}  join={self.join}  parts={self.parts}
+mask={list(self.mask)}
+        """
+
+        return s.strip()
+
 class AllAnimeCrypto:
     __cdn = "https://cdn.mkissa.net"
     __frontend = "https://youtu-chan.com"
+    __cache = ""
+
+    def __init__(self) -> None:
+        self.__global_index: dict[str, Callable[[int], int]] = {}
+        self.__sub_index: dict[str, Callable[[tuple], int]] = {}
+        self.__chunk: str = ""
+        self.__cfg: AllAnimeCryptoConfig
+
+    @property
+    def config(self) -> AllAnimeCryptoConfig:
+        return self.__cfg
 
     @staticmethod
     def sign(msg: str, key: bytes) -> bytes:
@@ -85,120 +152,253 @@ class AllAnimeCrypto:
         return key
 
     @staticmethod
-    def _get_build_id_mask(build_id: str) -> bytes:
-        ret = b""
-        for i in range(32):
-            ch = build_id[i % len(build_id)]
-            mask = 255 & (i * 17 + 31)
-            ret += int.to_bytes(ord(ch) ^ mask)
-        return ret
-
-
-    @staticmethod
     def derive_nonce(*args) -> bytes:
         encoded = ":".join(map(str, args)).encode()
         return hashlib.sha256(encoded).digest()[:12]
 
-    @staticmethod
-    def _get_sign_key_mask(script: str) -> bytes:
-        p_array_item = r'(?:"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\')'
-        p_array = r'function (\w{2})\(\){const\s+\w+=\[((?=[^\]]*"__prot")[^\]]*)\]'
+    def hash(self, value: str) -> bytes:
+        mul, add = self.__cfg.salt
+        ret = b""
+        for i in range(32):
+            ch = value[i % len(value)]
+            mask = 255 & (i * mul + add)
+            ret += int.to_bytes(ord(ch) ^ mask)
+        return ret
 
-        m = re.search(p_array, script)
-        if not m:
+    def xor(self, value1: bytes, value2: bytes) -> bytes:
+        ret = b""
+        mul, add = self.__cfg.frag
+        for i, (b1, b2) in enumerate(zip(value1, value2)):
+            v1 = b1 ^ b2
+            v2 = 255 & ((i // 8) * mul + (i % 8) * add)
+            ret += int.to_bytes(v1 ^ v2)
+
+        return ret
+
+
+    def _load_index_functions(self, chunk: str, array_func_name: str, specs: list[tuple[str, str, str]]) -> None:
+        for func_name, global_name, local_offset_expr in specs:
+            global_func_pattern = RE_SUB_INDEX_FUNC_PREFIX + global_name.replace("$", r"\$") + \
+                RE_GLOBAL_FUNC_INFIX + array_func_name + RE_GLOBAL_FUNC_SUFFIX
+            match = re.search(global_func_pattern, chunk)
+            if not match:
+                raise InvalidScript(f"global index function {global_name} not found")
+
+            global_offset = eval(match.group(1))
+            local_offset = eval(local_offset_expr)
+
+            self.__global_index[global_name] = _make_global_index_func(global_offset)
+            self.__sub_index[func_name] = _make_sub_index_func(local_offset, 1, self.__global_index[global_name])
+
+
+    def _load_array(self) -> tuple[list[str], str]:
+        match = re.search(RE_ARRAY_FUNC, self.__chunk)
+        if not match:
             raise InvalidScript("array not found")
 
-        array_func = m.group(1)
-        all_items = list(map(lambda s: s.strip("'").strip('"'), re.findall(p_array_item, m.group(2))))
+        array_func_name = match.group(1)
+        array_func_body = match.group(2)
+        
+        array_items = [s.strip("'").strip('"') for s in re.findall(RE_QUOTED_STRING, array_func_body)]
+        
 
-        p_shuffle_func = r"}\(function\(\w,\w\){([\w\s=\(\);,{}\-\+\.*\/]+)\)\(" + array_func + r",([\d\+\-\*\/ ]+)\)"
-        m = re.search(p_shuffle_func, script)
-        if not m:
+        shuffle_func_pattern = RE_SHUFFLE_FUNC_PREFIX + array_func_name + RE_SHUFFLE_FUNC_SUFFIX
+        match = re.search(shuffle_func_pattern, self.__chunk)
+        if not match:
             raise InvalidScript("array shuffle function not found")
 
-        shuffle_func = m.group(1)
+        shuffle_func_body = match.group(1)
+        
 
-        sub_index_funcs: dict[str, Callable[[tuple[int, ...]], int]] = {}
-        index_funcs: dict[str, Callable[[int], int]] = {}
+        local_num_maps = {}
+        local_num_map_matches = re.findall(RE_NUM_MAP, shuffle_func_body)
+        if not local_num_map_matches:
+            raise InvalidScript("no num maps found inside array shuffle func")
 
-        local_funcs = re.findall(r"function (\w)\((\w),\w\){return (\w{2})\((\w)-([\d\- ]+)\)}", shuffle_func)
-        if not local_funcs:
+        for m_name, m, _, _ in local_num_map_matches:
+            local_num_maps[m_name] = {}
+            for k, v in re.findall(RE_NUM_MAP_ENTRY, m):
+                local_num_maps[m_name][k] = int(v)
+
+        
+
+        
+        local_func_matches = re.findall(RE_LOCAL_INDEX_FUNC, shuffle_func_body)
+        if not local_func_matches:
             raise InvalidScript("no local index functions found")
 
-        for lname, arg, gname, lvalue_var, lvalue_num in local_funcs:
-            p_global = r"function " + gname + r"\(\w,\w\){return \w=\w-([\(\)\d\-+*\/]+)," + array_func + r"\(\)"
-            m = re.search(p_global, script)
-            if not m:
-                raise Exception(f"global index function {gname} not found")
+        local_index: dict[str, Callable[[tuple], int]] = {}
+        for local_name, arg_name, global_name, local_arg_name,\
+            local_offset_expr, local_offset_expr_hex_key, local_offset_expr_hex_key2 in local_func_matches:
 
-            gv = eval(m.group(1))
-            lv = eval(lvalue_num)
+            global_func_pattern = RE_SUB_INDEX_FUNC_PREFIX + global_name.replace("$", r"\$") + \
+                RE_GLOBAL_FUNC_INFIX + array_func_name + RE_GLOBAL_FUNC_SUFFIX
+            match = re.search(global_func_pattern, self.__chunk)
+            if not match:
+                raise InvalidScript(f"global index function {global_name} not found")
 
-            index_funcs[gname] = lambda v, _gv=gv: v - _gv
-            sub_index_funcs[lname] = lambda v, _lv=lv, _gn=gname, _i=int(arg != lvalue_var): index_funcs[_gn](v[_i] - _lv)
+            global_offset = eval(match.group(1))
+            if local_offset_expr_hex_key:
+                local_offset = local_num_maps[local_offset_expr_hex_key][local_offset_expr_hex_key2]
+            else:
+                local_offset = eval(local_offset_expr)
 
-        indexes = [
-            sub_index_funcs[fn](tuple(map(int, (val1, val2))))
-            for fn, val1, val2 in re.findall(r"parseInt\((\w)\(([-\d]+),([-\d]+)", shuffle_func)
-        ]
+            
+            self.__global_index[global_name] = _make_global_index_func(global_offset)
+            arg_index = int(arg_name != local_arg_name)
+            local_index[local_name] = \
+                _make_sub_index_func(local_offset, arg_index, self.__global_index[global_name])
 
-        while None in [parse_int(all_items[i]) for i in indexes]:
-            all_items.append(all_items.pop(0))
+        
+        shuffle_check_indexes = []
+        for fn,\
+            val1, val1_hex_key1, val1_hex_key2,\
+            val2, val2_hex_key1, val2_hex_key2 in re.findall(RE_SHUFFLE_CHECK, shuffle_func_body):
 
-        m = re.search(r"\w{2}=\[([\w\$]{2}\([^\]]+)", script)
-        if not m:
+            
+            if val1_hex_key1:
+                val1 = local_num_maps[val1_hex_key1][val1_hex_key2] * (1 - val1.startswith('-') * 2)
+
+            if val2_hex_key1:
+                val2 =  local_num_maps[val2_hex_key1][val2_hex_key2]  * (1 - val2.startswith('-') * 2)
+
+            
+            
+            shuffle_check_indexes.append(local_index[fn]((int(val1), int(val2))))
+
+        
+
+        while None in [parse_int(array_items[i]) for i in shuffle_check_indexes]:
+            array_items.append(array_items.pop(0))
+
+        
+        return array_items, array_func_name
+
+    def _get_mask(self, array: list[str], array_func_name: str) -> bytes:
+        match = re.search(RE_MASK_ARRAY, self.__chunk)
+        if not match:
             raise InvalidScript("mask array not found")
 
-        mask_indexes = []
-        for local_name, value in re.findall(r"([\w\$]{2}).+?([\de-]+)\)", m.group(1)):
-            p_sub = r"function " + local_name.replace("$", r'\$') + r"\(\w,\w\){return (\w{2})\(\w-([\d\- ]+)\)}"
-            m_ = re.search(p_sub, script)
-            if not m_:
-                raise InvalidScript(f"no {local_name} sub index function found")
+        mask_array_body = match.group(1)
+        specs = []
+        mask_data = []
+        for sub_func_name, value_str in re.findall(RE_GLOBAL_INDEX_FUNC_CALL, mask_array_body):
+            
+            sub_func_pattern = RE_SUB_INDEX_FUNC_PREFIX + sub_func_name.replace("$", r'\$') + RE_INDEX_FUNC_BODY2
+            
+            sub_match = re.search(sub_func_pattern, self.__chunk)
+            if not sub_match:
+                raise InvalidScript(f"no {sub_func_name} sub index function found")
 
-            global_name = m_.group(1)
-            if global_name not in index_funcs:
+            groups = list(filter(None, sub_match.groups()))
+
+            global_name = groups[1]
+            local_offset_expr = groups[-1]
+            
+            
+
+            if global_name not in self.__global_index:
                 raise InvalidScript(f"unknown global index function {global_name}")
 
-            mask_indexes.append(index_funcs[global_name](int(float(value) - int(m_.group(2)))))
+            specs.append((sub_func_name, global_name, local_offset_expr))
+            mask_data.append((global_name, value_str, eval(local_offset_expr)))
+
+        self._load_index_functions(self.__chunk, array_func_name, specs)
+
+        mask_indexes = [
+            self.__global_index[global_name](int(float(value_str) - local_offset))
+            for global_name, value_str, local_offset in mask_data
+        ]
+        
 
         mask = b""
-        for i in range(0, len(mask_indexes), 2):
-            p1 = all_items[mask_indexes[i]]
-            p2 = all_items[mask_indexes[i+1]]
-            mask += base64.b64decode(p1 + p2)
+        step = 4
+        for i in range(0, len(mask_indexes), step):
+            parts = [array[mask_indexes[i+ii]] for ii in range(step)]
+            
+            mask += base64.b64decode("".join(parts))
 
         return mask
 
-    @classmethod
-    async def _process_chunk(cls, chunk_url: str) -> tuple[str, str, bytes]:
-        chunk = await request_get(chunk_url, func=return_text)
+    def _get_build_id(self, array: list[str]) -> str:
+        match = re.search(RE_BUILD_ID, self.__chunk)
+        if not match:
+            raise InvalidScript("build id not found")
 
-        build_id_pattern = r'"(\d+)":""'
-        m = re.search(build_id_pattern, chunk)
-        if not m:
-            raise InvalidScript(f"build_id not found (chunk url: {chunk_url})")
+        sub_func_name = match.group(1)
+        arg = int(match.group(2))
+        build_id_idx = self.__sub_index[sub_func_name]((0, arg))
+        return array[build_id_idx]
 
-        build_id = m.group(1)
-        sign_key_mask = cls._get_sign_key_mask(chunk)
+    def _get_base_config(self, array: list[str]) -> AllAnimeCryptoConfig:
+        cfg = AllAnimeCryptoConfig()
 
-        return "k7", build_id, sign_key_mask
+        cfg_m = re.search(RE_BOOT_CFG, self.__chunk)
+        if not cfg_m:
+            raise InvalidScript("boot config not found")
 
-    @classmethod
-    async def get_aa_params(cls) -> tuple[str, str, bytes]:
+        cfg.salt = (int(cfg_m.group(1)), int(cfg_m.group(2)))
+        cfg.frag = (int(cfg_m.group(3)), int(cfg_m.group(4)))
+
+        boot_prefix_body = cfg_m.group(5)
+        boot_prefix_parts = []
+        for fn, idx in re.findall(RE_GLOBAL_INDEX_FUNC_CALL, boot_prefix_body):
+            arr_idx = self.__sub_index[fn]((0, int(float(idx))))
+            boot_prefix_parts.append(array[arr_idx])
+            
+        if '"' in boot_prefix_body:
+            suffix = re.search(r'"([\w:]+)"', boot_prefix_body)
+            if suffix:
+                boot_prefix_parts += suffix.group(1)
+
+        cfg.boot_prefix = ''.join(boot_prefix_parts)
+
+        cfg.join = cfg_m.group(8)
+        cfg.parts = []
+
+        parts_body = cfg_m.group(9)
+        for *_, string in re.findall(RE_GLOBAL_INDEX_FUNC_CALL + r'\+\"(\w+)\"', parts_body):
+            part = ""
+            match string:
+                case "up":
+                    part = "group"
+                case "e":
+                    part = "lane"
+                case "ch":
+                    part = "epoch"
+                case "t":
+                    part = "host"
+                case "d":
+                    part = "buildId"
+
+            assert(part)
+            cfg.parts.append(part)
+
+        return cfg
+
+    # return True if page changed
+    async def _load_chunk(self) -> bool:
         headers = {
             "Origin": f"https://mkissa.to", 
             "Referer": f"https://mkissa.to/"
         }
+        resp_headers = {}
 
         front_end = await request_get(
-            cls.__frontend, 
+            self.__frontend, 
             headers=headers,
+            resp_headers=resp_headers,
             func=return_text
         )
 
-        app_pattern    = rf'({cls.__cdn}/all/mk/_app/immutable/entry/app\.[\w-]+\.js)'
-        chunk_pattern  = r'(\.\./chunks/[\w-]+\.js)'
+        link = resp_headers["Link"]
+        cache = hashlib.sha256(link.encode()).digest()
+
+        if cache == self.__cache:
+            return False
+
+        self.__cache = cache
+        app_pattern = rf'({self.__cdn}/all/mk/_app/immutable/entry/app\.[\w-]+\.js)'
 
         m = re.search(app_pattern, front_end)
         if not m:
@@ -207,86 +407,119 @@ class AllAnimeCrypto:
         app_script_url = m.group(1)
         app_script = await request_get(app_script_url, func=return_text)
 
-        m = re.findall(chunk_pattern, app_script)
+        m = re.findall(RE_CHUNK_URL, app_script)
         if not m:
-            raise InvalidScript(f"no chunks found. (script url: {app_script_url})")
+            raise InvalidScript("no chunks found")
 
-        chunk_url = m[0].replace("..", f"{cls.__cdn}/all/mk/_app/immutable/")
-        return await cls._process_chunk(chunk_url)
+        chunk_url = m[0].replace("..", f"{self.__cdn}/all/mk/_app/immutable/")
+        self.__chunk = await request_get(chunk_url, func=lambda r: r.text())
 
-    @classmethod
-    def get_sign_key(cls, build_id: str, mask: bytes) -> bytes:
-        build_id_mask = cls._get_build_id_mask(build_id)
-        sign_key = b""
-        for i, (b1, b2) in enumerate(zip(build_id_mask, mask)):
-            v1 = b1 ^ b2
-            v2 = 255 & ((i // 8) * 41 + (i % 8) * 7)
-            sign_key += int.to_bytes(v1 ^ v2)
-        return sign_key
+        return True
 
-    @classmethod
-    async def get_aa_crypto(cls, sign_key: bytes, build_id: str, epoch: int, content_lane: str, host: str) -> dict:
+
+    async def load_config(self) -> AllAnimeCryptoConfig:
+        if not await self._load_chunk():
+            return self.__cfg
+
+        cfg = AllAnimeCryptoConfig()
+        array, array_func_name = self._load_array()
+
+        mask = self._get_mask(array, array_func_name)
+        build_id = self._get_build_id(array)
+
+        cfg = self._get_base_config(array)
+
+        cfg.mask = mask
+        cfg.build_id = build_id
+        cfg.epoch = current_epoch()
+        cfg.lane = CONTENT_LANE
+
+        self.__cfg = cfg
+        return cfg
+
+
+    async def get_aa_crypto(self, sign_key: bytes, cfg: AllAnimeCryptoConfig, host: str) -> dict:
         if host == "mkissa.to":
-            domain = "mkissa"
+            key_group = "mkissa"
         else:
-            domain = "mirror"
+            key_group = "mirror"
 
-        aa_boot_key = cls.sign(f'aa-boot:{build_id}', sign_key)
-        aa_boot = cls.sign(f'{build_id}:{domain}:{host}:{epoch}:{content_lane}', aa_boot_key)
+        aa_boot_values_all = {
+            "lane":     cfg.lane,
+            "buildId":  cfg.build_id,
+            "epoch":    str(cfg.epoch),
+            "host":     host,
+            "group":    key_group,
+        }
+        aa_boot_values = []
+        for p in cfg.parts:
+            aa_boot_values.append(aa_boot_values_all[p])
+
+        aa_boot_key = self.sign(f'{cfg.boot_prefix}{cfg.build_id}', sign_key)
+        aa_boot = self.sign(cfg.join.join(aa_boot_values), aa_boot_key)
 
         url = "https://api.mkissa.net/client-crypto/v1/bootstrap"
         headers = {
             "Origin": f"https://{host}",
             "Referer": f"https://{host}/",
             "x-aa-boot": aa_boot.hex(),
-            "x-build-id": build_id,
+            "x-build-id": cfg.build_id,
         }
 
         params = {
-            "buildId": build_id,
-            "k": content_lane,
+            "buildId": cfg.build_id,
+            "k": cfg.lane,
         }
 
         resp = await request_get(url, headers=headers, params=params, func=return_json)
         return resp
-
-
 
 class AllAnime:
     headers = {
         "user-agent": "Mozilla/5.0 (X11; Linux x86_64; rv:139.0) Gecko/20100101 Firefox/139.0",
         "referer": "https://allanime.day/",
     }
-    __crypto_key: bytes = b""
+
+    __crypto_key = b""
+    __crypto: AllAnimeCrypto | None = None
     
     @classmethod
-    async def generate_aareq(cls, qh: str, host: str) -> dict:
-        epoch = current_epoch()
-        content_lane, build_id, sign_key_mask = await AllAnimeCrypto.get_aa_params()
+    async def generate_aareq(cls, qh: str, host: str) -> tuple[str, str]:
+        if cls.__crypto: 
+            crypto = cls.__crypto
+        else:
+            crypto = AllAnimeCrypto()
+            cls.__crypto = crypto
 
-        sign_key = AllAnimeCrypto.get_sign_key(build_id, sign_key_mask)
-        aa_crypto = await AllAnimeCrypto.get_aa_crypto(sign_key, build_id, epoch, content_lane, host)
+        cfg = await crypto.load_config()
+
+        build_id_hash = crypto.hash(cfg.build_id)
+        sign_key = crypto.xor(build_id_hash, cfg.mask)
+
+        aa_crypto = await crypto.get_aa_crypto(sign_key, cfg, host)
+        part_b = aa_crypto.get('partB')
+        if not part_b:
+            raise InvalidResponse(aa_crypto)
 
         ts = int(time.time() * 1000) // 300_000 * 300_000
         json_blob = {
-            "v": 1,
-            "ts": ts,
-            "epoch": epoch,
-            "buildId": build_id,
-            "qh": qh,
-            "k": content_lane,
+            "v":        1,
+            "ts":       ts,
+            "epoch":    cfg.epoch,
+            "buildId":  cfg.build_id,
+            "qh":       qh,
+            "k":        cfg.lane,
         }
 
-        nonce = AllAnimeCrypto.derive_nonce(epoch, build_id, qh, ts, content_lane)
-        cls.__crypto_key = AllAnimeCrypto.derive_key(sign_key, aa_crypto['partB'])
+        nonce = crypto.derive_nonce(cfg.epoch, cfg.build_id, qh, ts, cfg.lane)
+        cls.__crypto_key = crypto.derive_key(sign_key, part_b)
         json_blob_string = json.dumps(json_blob, separators=(',',':'))
 
         aes = AES.new(cls.__crypto_key, AES.MODE_GCM, nonce=nonce)
         cipher, tag = aes.encrypt_and_digest(json_blob_string.encode())
 
-        aaReq_bytes = b"\x01" + nonce + cipher + tag
-
-        return {"aa_req": base64.b64encode(aaReq_bytes).decode(), "build_id": build_id}
+        aa_req = base64.b64encode(b"\x01" + nonce + cipher + tag).decode()
+        return aa_req, cfg.build_id
 
 
     @classmethod
