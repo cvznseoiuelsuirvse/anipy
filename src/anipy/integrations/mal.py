@@ -204,7 +204,7 @@ class MAL:
     async def search(self, title: str) -> list[SearchObject]:
         url = BASE_API_URL + "/anime"
         params = {
-            "q": urllib.parse.quote(title),
+            "q": title,
             "limit": 100,
             "fields": "alternative_titles,num_episodes,average_episode_duration,media_type"
         }

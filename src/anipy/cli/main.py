@@ -150,6 +150,7 @@ async def check_provider_external_id(anime: DataObject) -> str:
     if not resp:
         resp = await provider().search(anime.title)
 
+    print(resp)
     for a in resp:
         if (a.title and a.title.lower() == anime.title.lower()) or \
             anime.other_title.lower() == a.other_title.lower():
@@ -160,17 +161,12 @@ async def check_provider_external_id(anime: DataObject) -> str:
     raise ValueError("failed to get provider external_id")
 
 async def get_mal_id(anime: SearchObject | DataObject) -> str | None:
-    try:
-        res = await mal.search(anime.other_title)
+    res = await mal.search(anime.title)
 
-    except (InvalidResponse, InvalidStatusCode):
-        pass
-
-    else:
-        for r in res:
-            if (anime.title and anime.title.lower() == r.title.lower()) or \
-                    anime.other_title.lower() == r.other_title.lower():
-                    return r.external_id
+    for r in res:
+        if (anime.title and anime.title.lower() == r.title.lower()) or \
+                anime.other_title.lower() == r.other_title.lower():
+                return r.external_id
 
     id = await resolve_to_mal(anime.title, anime.other_title, return_id=True)
     if id:
@@ -258,7 +254,6 @@ async def watchlist_add(id: int):
         mal_id = await get_mal_id(anime)
         if not mal_id:
             return cli.raise_err(ErrorTypes.INVALID_RESULT, "mal_id not found")
-
 
     anime_info_json.pop("external_id")
     anime_info_json.pop("description")

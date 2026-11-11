@@ -1,3 +1,4 @@
+import asyncio
 import json
 import datetime
 import re
@@ -12,7 +13,7 @@ from ...core.util import cache
 from ...core.exceptions import InvalidResponse
 from ...core.types import SearchObject, AnimeInfo, EpisodeSources, AiringStatus
 
-BASE_URL = "https://aniwatchtv.to/"
+BASE_URL = "https://hianime.at/"
 HEADERS = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:109.0) Gecko/20100101 Firefox/115.0"}
 
 clean = lambda h: unescape(re.sub(r"\s", " ", h))
@@ -242,3 +243,11 @@ class HiAnime:
 
         e = Megacloud(video_url)
         return await e.extract()
+
+if __name__ == "__main__":
+    async def main():
+        a = HiAnime()
+        r = await a.search("rent a girl")
+        print(r)
+
+    asyncio.run(main())

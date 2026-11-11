@@ -29,7 +29,7 @@ RE_ARRAY_FUNC             = r'function (\w{2})\(\){const\s+\w+=\[((?=[^\]]*"epo"
 RE_LOCAL_INDEX_FUNC       = r"function (\w)" + RE_INDEX_FUNC_BODY
 RE_SHUFFLE_CHECK          = r"parseInt\((\w)\((" + RE_INDEX + "),(" + RE_INDEX + ")"
 RE_MASK_ARRAY             = r"\w{2}=\[((?:(?:" + RE_GLOBAL_INDEX_FUNC_CALL + r"\+?){4},?){4})"
-RE_BUILD_ID               = r"const [\w$]{2}=" + RE_GLOBAL_INDEX_FUNC_CALL + r",[\w$]{2}"
+RE_BUILD_ID               = r"const [\w$]{2}=" + RE_GLOBAL_INDEX_FUNC_CALL
 RE_CHUNK_URL              = r"(\.\./chunks/[\w-]+\.js)"
 RE_BOOT_CFG               = r'\{v:\d+,saltMul:(\d+),saltAdd:(\d+),fragMul:(\d+),fragAdd:(\d+),bootPrefix:((?:([\w\$]{2})\((?:[\de\-]+,)?([\de\-]+)\)\+?)+(?:"[\w:]+")?),join:"([^"]+)",parts:\[([\w\$]{2}\([^\]]+)\],omitEmptyLane:([^,]+),envXor:(\d+)'
 
@@ -92,19 +92,9 @@ async def resolve_mp4(url: str) -> str:
     
     return m.group()
 
-def current_epoch() -> int:
-    now = int(time.time())
-
-    EPOCH = 604800
-    GRACE = 86400
-
-    epoch = now // EPOCH
-    return epoch - (epoch > 0 and now % EPOCH < GRACE)
-
 
 class AllAnimeCryptoConfig:
     lane:        str
-    epoch:       int
     build_id:    str
     mask:        bytes
     salt:        tuple[int, int]
@@ -112,6 +102,16 @@ class AllAnimeCryptoConfig:
     boot_prefix: str
     join:        str
     parts:       list[str]
+
+    @property
+    def epoch(self) -> int:
+        now = int(time.time())
+
+        EPOCH = 604800
+        GRACE = 86400
+
+        epoch = now // EPOCH
+        return epoch - (epoch > 0 and now % EPOCH < GRACE)
 
     def __str__(self) -> str:
         s = f"""
@@ -431,7 +431,6 @@ class AllAnimeCrypto:
 
         cfg.mask = mask
         cfg.build_id = build_id
-        cfg.epoch = current_epoch()
         cfg.lane = CONTENT_LANE
 
         self.__cfg = cfg
